@@ -30,6 +30,8 @@ google-generativeai>=0.3.0,<1.0.0  # Google's Gemini API client
 # Additional generation utilities
 langchain>=0.0.340,<0.2.0  # Optional: For prompt templates and chains
 tiktoken>=0.5.0,<1.0.0  # Token counting for context management 
+langextract
+textwrap
 
 # WEB API DEPENDENCIES
 flask>=2.3.0,<3.0.0  # Core web framework
