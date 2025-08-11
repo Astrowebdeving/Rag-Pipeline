@@ -1,30 +1,44 @@
-"""Query Processing and Response Generation Routes"""
+"""Query Routes
+
+Routes for querying documents and retrieving relevant information.
+"""
 
 import logging
-import time
-from typing import Dict, Any, Optional
-from flask import Blueprint, request, jsonify
-
+import traceback
+from datetime import datetime
+from flask import Blueprint, jsonify, request
 from app.services.state_service import rag_state
-from app.utils.embedding import create_single_embedding
+from app.utils.embedding import create_query_embedding_with_method
 from app.retriever.dense_retriever import DenseRetriever
 from app.retriever.hybrid_retriever import HybridRetriever
 from app.retriever.advanced_retriever import AdvancedRetriever
-from app.augmented_generation.huggingface_generator import HuggingFaceGenerator
+from app.augmented_generation.huggingface_generator import create_huggingface_generator
 from app.augmented_generation.ollama_generator import OllamaGenerator
+from app.utils.auth import require_api_key
 
 logger = logging.getLogger(__name__)
 
-# Create blueprint
+# Create blueprint for query routes
 query_bp = Blueprint('query', __name__, url_prefix='/api')
 
+
 def create_retriever_with_method(method: str):
-    """Create retriever based on specified method."""
-    if method == 'dense':
-        return DenseRetriever()
-    elif method == 'hybrid':
+    """Create retriever instance based on configured method.
+    
+    Args:
+        method: Retrieval method ('dense', 'hybrid', 'advanced')
+        
+    Returns:
+        Retriever instance
+    """
+    # Update analytics if enabled
+    rag_state.update_analytics('retrieval', method=method)
+    
+    # Create retriever based on method
+    if method == 'hybrid':
         return HybridRetriever()
     elif method == 'advanced':
+        # Create advanced retriever with configuration and LLM enhancements
         return AdvancedRetriever(
             base_retriever_type='hybrid',
             rerank_results=rag_state.config.get('enable_reranking', True),
@@ -32,21 +46,28 @@ def create_retriever_with_method(method: str):
             diversity_factor=rag_state.config.get('diversity_factor', 0.3),
             use_llm_query_enhancement=True  # Enable LLM query enhancement for advanced retrieval
         )
-    else:
-        logger.warning(f"Unknown retrieval method: {method}, defaulting to dense")
+    else:  # default to dense
         return DenseRetriever()
 
-def get_generator() -> Optional[Any]:
-    """Get or create the appropriate generator based on configuration."""
-    generation_method = rag_state.config.get('generation_method', 'huggingface')
+
+def get_generator():
+    """Get or create LLM generator based on current configuration."""
+    # Check if we need to create/update the generator
+    current_method = rag_state.config['generation_method']
+    current_model = rag_state.config.get('generation_model', 'google/flan-t5-base')
     
-    # Check if we have a cached generator of the right type
+    # Return None if generation is disabled
+    if current_method == 'none':
+        return None
+    
+    # Check if we can reuse cached generator
     if (rag_state.cached_generator is not None and 
-        rag_state.cached_generator_type == generation_method):
+        rag_state.cached_generator_type == current_method):
         return rag_state.cached_generator
     
+    # Create new generator based on method
     try:
-        if generation_method == 'ollama':
+        if current_method == 'ollama':
             logger.info("Creating Ollama generator with model: deepseek-r1:8b")
             generator = OllamaGenerator(
                 model_name="deepseek-r1:8b",
@@ -60,231 +81,318 @@ def get_generator() -> Optional[Any]:
             logger.info("Ollama generator cached successfully")
             return generator
             
-        elif generation_method == 'huggingface':
-            logger.info("Creating HuggingFace generator")
-            model_name = rag_state.config.get('generation_model', 'google/flan-t5-large')
-            generator = HuggingFaceGenerator(model_name=model_name)
+        elif current_method == 'huggingface':
+            generator = create_huggingface_generator(
+                "google/flan-t5-base", use_small_model=True
+            )
             
-            # Cache the generator
+            # Cache the generator for future use
             rag_state.cached_generator = generator
             rag_state.cached_generator_type = 'huggingface'
-            logger.info(f"HuggingFace generator cached: {model_name}")
+            
             return generator
-            
         else:
-            logger.warning(f"Unknown generation method: {generation_method}")
+            # No generation method or unsupported method
             return None
-            
+        
     except Exception as e:
-        logger.error(f"Failed to create generator ({generation_method}): {e}")
+        # Handle generator creation errors
+        logger.error(f"Failed to create generator: {str(e)}")
         return None
 
-@query_bp.route('/query', methods=['POST'])
-def process_query():
-    """Process user query and return response."""
-    start_time = time.time()
+
+def validate_chunk_relevance(chunks_with_scores, query, min_score=0.1):
+    """Validate and filter chunks for quality and relevance.
     
+    Args:
+        chunks_with_scores: List of (chunk, score) tuples
+        query: Original query text
+        min_score: Minimum relevance score threshold
+        
+    Returns:
+        Filtered list of (chunk, score) tuples
+    """
+    if not chunks_with_scores:
+        return []
+    
+    # Filter by minimum score
+    filtered_chunks = [(chunk, score) for chunk, score in chunks_with_scores 
+                      if score >= min_score]
+    
+    # Remove duplicate chunks
+    seen_chunks = set()
+    unique_chunks = []
+    
+    for chunk, score in filtered_chunks:
+        chunk_text = chunk.strip().lower()
+        if chunk_text not in seen_chunks and len(chunk_text) > 20:
+            seen_chunks.add(chunk_text)
+            unique_chunks.append((chunk, score))
+    
+    logger.debug(f"Filtered {len(chunks_with_scores)} chunks to {len(unique_chunks)} unique, relevant chunks")
+    
+    return unique_chunks
+
+
+@query_bp.route('/query', methods=['POST'])
+@require_api_key
+def query_documents():
+    """Process user query and return AI-generated response with sources."""
     try:
-        # Get request data
+        # Check if request has JSON data
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+            
+        # Get query data from request
         data = request.get_json()
-        if not data or 'query' not in data:
-            return jsonify({'error': 'Query is required'}), 400
+        if not data:
+            return jsonify({'error': 'Invalid JSON data'}), 400
+            
+        query = data.get('query', '').strip()
+        top_k = data.get('top_k', rag_state.config.get('retrieval_top_k', 5))
+        use_generation = data.get('use_generation', True)
         
-        query_text = data['query'].strip()
-        if not query_text:
-            return jsonify({'error': 'Query cannot be empty'}), 400
+        # Validate input
+        if not query:
+            return jsonify({'error': 'No query provided'}), 400
+            
+        if not rag_state.all_chunks:
+            return jsonify({'error': 'No documents have been ingested yet'}), 400
         
-        logger.info(f"Processing query: {query_text[:100]}...")
+        logger.info(f"Processing query: '{query[:50]}...' (top_k={top_k})")
         
-        # Check if we have any documents
-        if rag_state.get_chunk_count() == 0:
-            return jsonify({
-                'success': False,
-                'error': 'No documents available. Please upload documents first.',
-                'response': 'I don\'t have any documents to search through. Please upload some documents first.',
-                'retrieved_chunks': [],
-                'processing_time': time.time() - start_time
-            })
+        # Create query embedding using the same method as stored documents
+        embedding_method = rag_state.actual_embedding_method or rag_state.config['embedding_method']
+        logger.info(f"Using embedding method for query: {embedding_method}")
         
-        # Get configuration
-        retrieval_method = rag_state.config.get('retrieval_method', 'dense')
-        embedding_method = rag_state.config.get('embedding_method', 'sentence_transformer')
-        generation_method = rag_state.config.get('generation_method', 'huggingface')
-        top_k = rag_state.config.get('retrieval_top_k', 5)
-        
-        # Create query embedding
-        logger.info(f"Creating query embedding using: {embedding_method}")
-        query_embedding = create_single_embedding(query_text, method=embedding_method)
+        query_embedding = create_query_embedding_with_method(
+            query, 
+            embedding_method
+        )
         
         if query_embedding is None:
-            return jsonify({
-                'error': 'Failed to create query embedding',
-                'details': 'Embedding service may be unavailable'
-            }), 500
+            return jsonify({'error': 'Failed to create query embedding'}), 500
         
-        # Create retriever and retrieve relevant chunks
-        logger.info(f"Retrieving chunks using method: {retrieval_method}")
-        retriever = create_retriever_with_method(retrieval_method)
+        # Retrieve relevant chunks using configured method
+        retriever = create_retriever_with_method(rag_state.config['retrieval_method'])
         
-        if retrieval_method == 'advanced':
-            # Advanced retriever needs both embedding and text
-            retrieved_chunks = retriever.retrieve(
-                vector_store=rag_state.vector_store,
-                query_embedding=query_embedding,
-                query_text=query_text,
-                top_k=top_k
-            )
-        elif retrieval_method == 'hybrid':
-            # Hybrid retriever needs both embedding and text
-            retrieved_chunks = retriever.retrieve(
-                vector_store=rag_state.vector_store,
-                query_embedding=query_embedding,
-                query_text=query_text,
-                top_k=top_k
-            )
-        else:
-            # Dense retriever only needs embedding
-            retrieved_chunks = retriever.retrieve(
-                vector_store=rag_state.vector_store,
-                query_embedding=query_embedding,
-                top_k=top_k
-            )
+        # Handle different retriever types properly
+        chunks_with_scores = []
         
-        if not retrieved_chunks:
-            return jsonify({
-                'success': False,
-                'error': 'No relevant content found',
-                'response': 'I couldn\'t find any relevant information for your query.',
-                'retrieved_chunks': [],
-                'processing_time': time.time() - start_time
-            })
-        
-        logger.info(f"Retrieved {len(retrieved_chunks)} relevant chunks")
+        try:
+            if rag_state.config['retrieval_method'] == 'advanced':
+                chunks_with_scores = retriever.retrieve_with_scores(
+                    rag_state.vector_store, query_embedding, query, top_k
+                )
+            elif rag_state.config['retrieval_method'] == 'hybrid':
+                chunks_with_scores = retriever.retrieve_with_scores(
+                    rag_state.vector_store, query_embedding, query, top_k
+                )
+            else:
+                chunks_with_scores = retriever.retrieve_with_scores(
+                    rag_state.vector_store, query_embedding, top_k
+                )
+            
+            # Ensure we have a valid list (not None)
+            if chunks_with_scores is None:
+                chunks_with_scores = []
+                logger.warning("Retriever returned None, using empty list")
+                
+        except Exception as retrieval_error:
+            logger.error(f"Retrieval failed: {str(retrieval_error)}")
+            chunks_with_scores = []
         
         # Update analytics
         rag_state.update_analytics('query')
-        rag_state.update_analytics('retrieval', method=retrieval_method)
         
-        # Generate response if generation is enabled
-        response_text = ""
-        generation_info = {}
+        # Validate and filter chunks for quality
+        validated_chunks = validate_chunk_relevance(chunks_with_scores, query)
         
-        if generation_method != 'none':
-            logger.info(f"Generating response using: {generation_method}")
-            generator = get_generator()
-            
-            if generator is None:
-                logger.error("No AI generator available")
-                generation_info = {
-                    'method': generation_method,
-                    'success': False,
-                    'error': 'No AI generator available'
-                }
-                rag_state.update_analytics('error')
-                
-                # Return retrieval results without generation
-                return jsonify({
-                    'success': True,
-                    'response': 'I found relevant information but couldn\'t generate a response. Here are the relevant chunks:',
-                    'retrieved_chunks': retrieved_chunks,
-                    'generation_info': generation_info,
-                    'retrieval_method': retrieval_method,
-                    'processing_time': time.time() - start_time
-                })
-            
-            try:
-                # Generate response
-                generation_result = generator.generate_response(
-                    query=query_text,
-                    retrieved_chunks=retrieved_chunks
-                )
-                
-                if generation_result.get('success', False):
-                    response_text = generation_result.get('response', '')
-                    generation_info = {
-                        'method': generation_method,
-                        'success': True,
-                        'model': generation_result.get('model', 'unknown')
-                    }
-                    rag_state.analytics['successful_generations'] += 1
-                    logger.info("Response generated successfully")
-                else:
-                    error_msg = generation_result.get('error', 'Unknown generation error')
-                    logger.error(f"AI Generation Issue: {error_msg}")
-                    generation_info = {
-                        'method': generation_method,
-                        'success': False,
-                        'error': error_msg
-                    }
-                    rag_state.analytics['failed_generations'] += 1
-                    rag_state.update_analytics('error')
-                    
-                    # Fallback to chunk-based response
-                    response_text = "I found relevant information but couldn't generate a synthesized response. Here's what I found:"
-                    
-            except Exception as e:
-                logger.error(f"Error during response generation: {e}")
-                generation_info = {
-                    'method': generation_method,
-                    'success': False,
-                    'error': str(e)
-                }
-                rag_state.analytics['failed_generations'] += 1
-                rag_state.update_analytics('error')
-                response_text = "I found relevant information but encountered an error during response generation."
-        else:
-            # No generation - just return retrieved chunks
-            response_text = "Here are the most relevant chunks from your documents:"
-            generation_info = {'method': 'none', 'success': True}
-        
-        processing_time = time.time() - start_time
-        logger.info(f"Query processed in {processing_time:.2f}s")
-        
-        return jsonify({
-            'success': True,
-            'response': response_text,
-            'retrieved_chunks': retrieved_chunks,
-            'generation_info': generation_info,
-            'retrieval_method': retrieval_method,
-            'embedding_method': embedding_method,
-            'chunks_retrieved': len(retrieved_chunks),
-            'processing_time': processing_time
-        })
-        
-    except Exception as e:
-        processing_time = time.time() - start_time
-        logger.error(f"Error processing query: {e}")
-        rag_state.update_analytics('error')
-        
-        return jsonify({
-            'success': False,
-            'error': 'Failed to process query',
-            'details': str(e),
-            'processing_time': processing_time
-        }), 500
-
-@query_bp.route('/query/test', methods=['GET'])
-def test_query():
-    """Test endpoint to check if query processing is working."""
-    try:
-        stats = {
-            'documents_available': rag_state.get_document_count(),
-            'chunks_available': rag_state.get_chunk_count(),
-            'current_config': rag_state.get_config(),
-            'generator_available': get_generator() is not None,
-            'vector_store_ready': hasattr(rag_state.vector_store, 'search')
+        # Prepare response data
+        response_data = {
+            'chunks': [chunk for chunk, _ in validated_chunks],
+            'scores': [float(score) for _, score in validated_chunks],
+            'num_results': len(validated_chunks),
+            'retrieval_method': rag_state.config['retrieval_method'],
+            'embedding_method': rag_state.config['embedding_method'],
+            'generation_enabled': use_generation,
+            'query_processed': query,
+            'validation_applied': True,
+            'original_results_count': len(chunks_with_scores),
+            'config_used': {
+                'top_k': top_k,
+                'retrieval_method': rag_state.config['retrieval_method'],
+                'embedding_method': rag_state.config['embedding_method']
+            }
         }
         
-        return jsonify({
-            'success': True,
-            'message': 'Query system is ready',
-            'stats': stats
-        })
+        # Generate AI response if requested and possible
+        if use_generation and rag_state.config['generation_method'] != 'none':
+            generator = get_generator()
+            
+            if generator:
+                # Extract just the chunk texts for generation (use validated chunks)
+                chunk_texts = [chunk for chunk, _ in validated_chunks]
+                
+                if chunk_texts:
+                    # Generate response using LLM
+                    generation_result = generator.generate_response(query, chunk_texts)
+                    
+                    if generation_result.get('success'):
+                        response_data['generated_response'] = generation_result['response']
+                        response_data['model_used'] = generation_result.get('model_used', generation_result.get('model', 'unknown'))
+                        response_data['generation_method'] = rag_state.config['generation_method']
+                        rag_state.analytics['successful_generations'] += 1
+                    else:
+                        response_data['generation_error'] = generation_result.get('error', 'Unknown error')
+                        rag_state.analytics['failed_generations'] += 1
+                else:
+                    response_data['generation_error'] = 'No relevant chunks found for generation'
+            else:
+                response_data['generation_error'] = 'No generator available'
+        
+        logger.info(f"Query processed: '{query[:50]}...' -> {len(validated_chunks)} chunks")
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
-        logger.error(f"Error in query test: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Query system test failed',
-            'details': str(e)
-        }), 500
+        # Handle query processing errors
+        logger.error(f"Query processing failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        rag_state.update_analytics('error')
+        return jsonify({'error': str(e)}), 500
+
+
+@query_bp.route('/search', methods=['POST'])
+@require_api_key
+def search_chunks():
+    """Simple search through document chunks without AI generation."""
+    try:
+        # Check if request has JSON data
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+            
+        # Get search data from request
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON data'}), 400
+            
+        query = data.get('query', '').strip()
+        top_k = data.get('top_k', 10)
+        
+        # Validate input
+        if not query:
+            return jsonify({'error': 'No query provided'}), 400
+            
+        if not rag_state.all_chunks:
+            return jsonify({'error': 'No documents have been ingested yet'}), 400
+        
+        logger.info(f"Searching chunks for: '{query[:50]}...'")
+        
+        # Create query embedding
+        query_embedding = create_query_embedding_with_method(
+            query, 
+            rag_state.config['embedding_method']
+        )
+        
+        if query_embedding is None:
+            return jsonify({'error': 'Failed to create query embedding'}), 500
+        
+        # Use simple dense retriever for search
+        retriever = DenseRetriever()
+        chunks_with_scores = retriever.retrieve_with_scores(
+            rag_state.vector_store, query_embedding, top_k
+        )
+        
+        if chunks_with_scores is None:
+            chunks_with_scores = []
+        
+        # Prepare search results
+        search_results = []
+        for chunk, score in chunks_with_scores:
+            search_results.append({
+                'chunk': chunk,
+                'score': float(score),
+                'length': len(chunk)
+            })
+        
+        response_data = {
+            'results': search_results,
+            'num_results': len(search_results),
+            'query': query,
+            'embedding_method': rag_state.config['embedding_method'],
+            'total_chunks_searched': len(rag_state.all_chunks)
+        }
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logger.error(f"Search failed: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@query_bp.route('/similar', methods=['POST'])
+@require_api_key
+def find_similar():
+    """Find chunks similar to provided text."""
+    try:
+        # Check if request has JSON data
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+            
+        # Get similarity data from request
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON data'}), 400
+            
+        text = data.get('text', '').strip()
+        top_k = data.get('top_k', 5)
+        
+        # Validate input
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
+            
+        if not rag_state.all_chunks:
+            return jsonify({'error': 'No documents have been ingested yet'}), 400
+        
+        logger.info(f"Finding similar chunks for: '{text[:50]}...'")
+        
+        # Create embedding for input text
+        text_embedding = create_query_embedding_with_method(
+            text, 
+            rag_state.config['embedding_method']
+        )
+        
+        if text_embedding is None:
+            return jsonify({'error': 'Failed to create text embedding'}), 500
+        
+        # Use dense retriever to find similar chunks
+        retriever = DenseRetriever()
+        similar_chunks = retriever.retrieve_with_scores(
+            rag_state.vector_store, text_embedding, top_k
+        )
+        
+        if similar_chunks is None:
+            similar_chunks = []
+        
+        # Prepare similarity results
+        similarity_results = []
+        for chunk, score in similar_chunks:
+            similarity_results.append({
+                'chunk': chunk,
+                'similarity_score': float(score),
+                'length': len(chunk)
+            })
+        
+        response_data = {
+            'similar_chunks': similarity_results,
+            'num_results': len(similarity_results),
+            'input_text': text,
+            'embedding_method': rag_state.config['embedding_method']
+        }
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logger.error(f"Similarity search failed: {str(e)}")
+        return jsonify({'error': str(e)}), 500

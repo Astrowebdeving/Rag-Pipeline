@@ -194,4 +194,4 @@ def reset_analytics():
         
     except Exception as e:
         logger.error(f"Analytics reset failed: {str(e)}")
-        return jsonify({'error': str(e)}), 500 
+        return jsonify({'error': str(e)}), 500
