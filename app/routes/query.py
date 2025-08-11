@@ -71,8 +71,9 @@ def get_generator():
             logger.info("Creating Ollama generator with model: deepseek-r1:8b")
             generator = OllamaGenerator(
                 model_name="deepseek-r1:8b",
-                max_tokens=500,
-                temperature=0.7
+                max_tokens=rag_state.config.get('llm_max_tokens', 3000),
+                temperature=0.3,
+                timeout=rag_state.config.get('llm_timeout', 30)
             )
             
             # Cache the generator

@@ -35,7 +35,9 @@ class RAGSystemState:
             'batch_size': 1000,  # Batch size for processing large datasets
             'enable_analytics': True,  # Enable analytics tracking
             'cache_embeddings': True,  # Enable embedding caching
-            'detailed_logging': True  # Enable detailed logging of LLM responses and chunks
+            'detailed_logging': True,  # Enable detailed logging of LLM responses and chunks
+            'llm_timeout': 60,  # LLM generation timeout in seconds (increased for DeepSeek-R1 thinking)
+            'llm_max_tokens': 2000  # Maximum tokens for LLM generation (increased for DeepSeek-R1 thinking + answer)
         }
         
         # Log the configuration being loaded for debugging

@@ -18,8 +18,8 @@ class OllamaGenerator:
         self,
         model_name: str = "deepseek-r1:8b",
         base_url: str = "http://localhost:11434",
-        max_tokens: int = 500,
-        temperature: float = 0.7,
+        max_tokens: int = 3000,
+        temperature: float = 0.3,
         timeout: int = 30
     ):
         """Initialize Ollama generator.
@@ -120,15 +120,20 @@ class OllamaGenerator:
                     prompt = f"Question: {query}\n\nAnswer:"
             
             # Prepare request payload
+            # For DeepSeek-R1, we need much higher token limits and no stop tokens
+            # to allow for complete thinking process + final answer
+            is_deepseek = "deepseek" in self.model_name.lower()
+            
             payload = {
                 "model": self.model_name,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "num_predict": self.max_tokens,
+                    "num_predict": max(self.max_tokens, 3000) if is_deepseek else self.max_tokens,
                     "temperature": self.temperature,
                     "top_p": 0.9,
-                    "stop": ["\n\n", "Question:", "Context:"]
+                    # Remove stop tokens for DeepSeek-R1 to allow complete thinking process
+                    "stop": [] if is_deepseek else ["\n\n", "Question:", "Context:"]
                 }
             }
             
@@ -146,10 +151,12 @@ class OllamaGenerator:
                 generated_text = result.get('response', '').strip()
                 
                 if generated_text:
-                    logger.info(f"Generated response with {len(generated_text)} characters")
+                    # Special handling for DeepSeek-R1 models that use thinking process
+                    final_answer = self._extract_final_answer(generated_text)
+                    logger.info(f"Generated response with {len(generated_text)} characters, final answer: {len(final_answer)} characters")
                     return {
                         'success': True,
-                        'response': generated_text,
+                        'response': final_answer,
                         'model': self.model_name
                     }
                 else:
@@ -214,6 +221,68 @@ class OllamaGenerator:
             bool: True if Ollama and model are available
         """
         return self._check_ollama_availability() and self._check_model_availability()
+    
+    def _extract_final_answer(self, generated_text: str) -> str:
+        """Extract the final answer from DeepSeek-R1 response, removing thinking process.
+        
+        DeepSeek-R1 models generate responses in this format:
+        <think>
+        [internal reasoning process]
+        </think>
+        
+        [final answer]
+        
+        This method extracts only the final answer part.
+        """
+        try:
+            # Check if this is a DeepSeek-R1 response with thinking tags
+            if '<think>' in generated_text:
+                if '</think>' in generated_text:
+                    # Complete thinking process - extract final answer
+                    think_end = generated_text.find('</think>')
+                    final_answer = generated_text[think_end + len('</think>'):].strip()
+                    
+                    if final_answer and len(final_answer) > 10:  # Ensure meaningful content
+                        logger.debug(f"Extracted final answer from DeepSeek-R1: {len(final_answer)} chars")
+                        return final_answer
+                    else:
+                        logger.warning("DeepSeek-R1 completed thinking but no substantial final answer found")
+                        # Try to extract the last meaningful sentence from thinking process
+                        thinking_content = generated_text[generated_text.find('<think>') + 7:think_end].strip()
+                        sentences = thinking_content.split('.')
+                        if sentences and len(sentences) > 1:
+                            last_sentence = sentences[-2].strip() + '.'
+                            if len(last_sentence) > 20:
+                                logger.info("Using last meaningful sentence from thinking process as answer")
+                                return last_sentence
+                        return "I need to process this further. Please increase the token limit for a complete answer."
+                else:
+                    # Incomplete thinking process - response was cut off
+                    logger.warning("DeepSeek-R1 response cut off during thinking process")
+                    
+                    # Try to extract the most relevant part of the thinking process
+                    thinking_start = generated_text.find('<think>') + 7
+                    thinking_content = generated_text[thinking_start:].strip()
+                    
+                    # Look for conclusion-like phrases in the thinking
+                    conclusion_phrases = ["In conclusion", "So the answer", "Therefore", "The result is", "Final answer"]
+                    for phrase in conclusion_phrases:
+                        if phrase.lower() in thinking_content.lower():
+                            start_idx = thinking_content.lower().find(phrase.lower())
+                            conclusion = thinking_content[start_idx:start_idx + 200].strip()
+                            if conclusion:
+                                logger.info("Extracted conclusion from incomplete thinking process")
+                                return conclusion
+                    
+                    return "The response was cut off during processing. Please increase the token limit (current: {}) or timeout for a complete answer.".format(self.max_tokens)
+            
+            # For non-DeepSeek models or responses without thinking tags, return as-is
+            return generated_text
+            
+        except Exception as e:
+            logger.error(f"Error extracting final answer: {e}")
+            # Return original text if extraction fails
+            return generated_text
 
 
 def create_ollama_generator(

@@ -72,10 +72,12 @@ class AdvancedRetriever:
         if self._query_enhancer is None and self.use_llm_query_enhancement:
             try:
                 from app.augmented_generation.ollama_generator import OllamaGenerator
+                from app.services.state_service import rag_state
                 self._query_enhancer = OllamaGenerator(
                     model_name="deepseek-r1:8b",
                     max_tokens=50,
-                    temperature=0.2
+                    temperature=0.2,
+                    timeout=rag_state.config.get('llm_timeout', 30)
                 )
                 logger.info("Ollama query enhancer initialized successfully")
             except Exception as e:
