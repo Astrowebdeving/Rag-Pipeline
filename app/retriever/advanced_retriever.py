@@ -134,6 +134,43 @@ Related terms:"""
         
         return original_query
     
+    def _generate_chunk_metadata_on_demand(self, chunk: str, chunk_metadata: dict) -> dict:
+        """Generate metadata for a chunk on-demand during query processing."""
+        # If metadata already has LLM analysis, return it
+        if chunk_metadata.get('topics_analyzed', False) and chunk_metadata.get('semantic_description'):
+            return chunk_metadata
+        
+        # Generate metadata using LLM
+        try:
+            enhancer = self._get_query_enhancer()  # Reuse the same LLM instance
+            if enhancer is None:
+                return chunk_metadata
+            
+            analysis_prompt = f"""Analyze this text and provide a brief summary and key topics:
+
+Text: {chunk[:400]}
+
+Summary and keywords:"""
+            
+            response_data = enhancer.generate_response(query=analysis_prompt, retrieved_chunks=[])
+            if response_data.get('success', False):
+                response = response_data.get('response', '').strip()
+                
+                if response and len(response) > 10:
+                    # Update metadata
+                    updated_metadata = chunk_metadata.copy()
+                    updated_metadata['semantic_description'] = response[:200] if response else ''
+                    updated_metadata['keywords'] = response.split()[:5]  # Simple keyword extraction
+                    updated_metadata['topics_analyzed'] = True
+                    
+                    logger.debug(f"Generated on-demand metadata for chunk: {response[:50]}...")
+                    return updated_metadata
+            
+        except Exception as e:
+            logger.debug(f"Failed to generate on-demand metadata: {e}")
+        
+        return chunk_metadata
+    
     def retrieve(
         self, 
         vector_store: BaseVectorStore, 
@@ -173,12 +210,14 @@ Related terms:"""
                     if chunks and scores:
                         for i, (chunk, score) in enumerate(zip(chunks, scores)):
                             metadata = metadata_list[i] if i < len(metadata_list) else {}
+                            # Generate metadata on-demand if needed for advanced retrieval
+                            enhanced_metadata = self._generate_chunk_metadata_on_demand(chunk, metadata)
                             all_candidates.append({
                                 'chunk': chunk,
                                 'base_score': score,
                                 'query': expanded_query,
                                 'embedding': query_embedding,
-                                'metadata': metadata
+                                'metadata': enhanced_metadata
                             })
                 except Exception as e:
                     logger.warning(f"Failed to retrieve with metadata, falling back to base retriever: {e}")
@@ -195,12 +234,15 @@ Related terms:"""
                     
                     if candidates:
                         for chunk, score in candidates:
+                            # Generate metadata on-demand even for fallback candidates
+                            basic_metadata = {'chunk_index': len(all_candidates), 'topics_analyzed': False}
+                            enhanced_metadata = self._generate_chunk_metadata_on_demand(chunk, basic_metadata)
                             all_candidates.append({
                                 'chunk': chunk,
                                 'base_score': score,
                                 'query': expanded_query,
                                 'embedding': query_embedding,
-                                'metadata': {}  # Empty metadata for fallback
+                                'metadata': enhanced_metadata
                             })
             
             # Remove duplicates while preserving best scores
@@ -228,6 +270,100 @@ Related terms:"""
             try:
                 fallback_retriever = DenseRetriever()
                 return fallback_retriever.retrieve(vector_store, query_embedding, top_k)
+            except Exception as fallback_error:
+                logger.error(f"Fallback retrieval also failed: {fallback_error}")
+                return []
+    
+    def retrieve_with_scores(
+        self, 
+        vector_store: BaseVectorStore, 
+        query_embedding: np.ndarray, 
+        query_text: str, 
+        top_k: int = 5
+    ) -> List[Tuple[str, float]]:
+        """Retrieve documents with similarity scores using advanced methods.
+        
+        Args:
+            vector_store: Vector store to search
+            query_embedding: Query embedding vector
+            query_text: Original query text
+            top_k: Number of results to return
+            
+        Returns:
+            List of (chunk, score) tuples ordered by relevance
+        """
+        try:
+            # Step 1: Enhance query with LLM if enabled
+            enhanced_query = self._enhance_query_with_llm(query_text) if self.use_llm_query_enhancement else query_text
+            
+            # Step 2: Expand queries if enabled
+            expanded_queries = self._expand_query(enhanced_query) if self.expand_queries else [enhanced_query]
+            
+            # Step 3: Retrieve candidates from all expanded queries
+            all_candidates = []
+            candidate_k = min(top_k * 4, 50)  # Limit to prevent excessive retrieval
+            
+            for expanded_query in expanded_queries:
+                try:
+                    # Try to retrieve with metadata if vector store supports it
+                    chunks, scores, metadata_list = vector_store.search(query_embedding, candidate_k)
+                    
+                    if chunks and scores:
+                        for i, (chunk, score) in enumerate(zip(chunks, scores)):
+                            metadata = metadata_list[i] if i < len(metadata_list) else {}
+                            # Generate metadata on-demand if needed for advanced retrieval
+                            enhanced_metadata = self._generate_chunk_metadata_on_demand(chunk, metadata)
+                            all_candidates.append({
+                                'chunk': chunk,
+                                'base_score': score,
+                                'query': expanded_query,
+                                'embedding': query_embedding,
+                                'metadata': enhanced_metadata
+                            })
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve with metadata, falling back to base retriever: {e}")
+                    
+                    # Fallback to base retriever without metadata
+                    if self.base_retriever_type == 'hybrid':
+                        candidates = self.base_retriever.retrieve_with_scores(
+                            vector_store, query_embedding, expanded_query, candidate_k
+                        )
+                    else:
+                        candidates = self.base_retriever.retrieve_with_scores(
+                            vector_store, query_embedding, candidate_k
+                        )
+                    
+                    if candidates:
+                        for chunk, score in candidates:
+                            # Generate metadata on-demand even for fallback candidates
+                            basic_metadata = {'chunk_index': len(all_candidates), 'topics_analyzed': False}
+                            enhanced_metadata = self._generate_chunk_metadata_on_demand(chunk, basic_metadata)
+                            all_candidates.append({
+                                'chunk': chunk,
+                                'base_score': score,
+                                'query': expanded_query,
+                                'embedding': query_embedding,
+                                'metadata': enhanced_metadata
+                            })
+            
+            # Remove duplicates while preserving best scores
+            unique_candidates = self._deduplicate_candidates(all_candidates)
+            
+            # Step 4: Rerank candidates if enabled
+            if self.rerank_results and unique_candidates:
+                reranked_results = self._rerank_candidates(unique_candidates, query_text, vector_store)
+                return reranked_results[:top_k]
+            else:
+                # Sort by base score and return top_k
+                unique_candidates.sort(key=lambda x: x['base_score'], reverse=True)
+                return [(candidate['chunk'], candidate['base_score']) for candidate in unique_candidates[:top_k]]
+                
+        except Exception as e:
+            logger.error(f"Advanced retrieval with scores failed: {e}")
+            # Fallback to simple dense retrieval
+            try:
+                fallback_retriever = DenseRetriever()
+                return fallback_retriever.retrieve_with_scores(vector_store, query_embedding, top_k)
             except Exception as fallback_error:
                 logger.error(f"Fallback retrieval also failed: {fallback_error}")
                 return []

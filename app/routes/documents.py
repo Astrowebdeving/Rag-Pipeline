@@ -5,6 +5,7 @@ Routes for document upload, ingestion, and management.
 
 import logging
 import traceback
+import numpy as np
 from flask import Blueprint, jsonify, request
 from werkzeug.utils import secure_filename
 from app.services.state_service import rag_state
@@ -12,7 +13,7 @@ from app.services.file_service import file_service
 from app.utils.chunking import create_chunks_with_method, create_chunks
 from app.utils.embedding import create_embeddings_with_method, create_embeddings
 from app.utils.auth import require_api_key
-from app.augmented_generation.ollama_generator import OllamaGenerator
+# Note: LLM generation moved to query processing
 
 logger = logging.getLogger(__name__)
 
@@ -192,28 +193,37 @@ def upload_document():
                 **rag_state.config
             )
             
-            # Determine if we should enable metadata generation (for advanced retrieval)
-            enable_metadata = rag_state.config.get('retrieval_method') == 'advanced'
-            
-            # Generate metadata for chunks if advanced retrieval is enabled
-            chunk_metadata = None
-            if enable_metadata:
-                logger.info("Generating metadata for chunks with LLM analysis")
-                chunk_metadata = generate_chunk_metadata(
-                    chunks, doc_id, file_info['filename'], 
-                    file_info['extension'],
-                    enable_llm_analysis=True
-                )
+            # For upload, we only create basic metadata without LLM analysis
+            # LLM analysis will be done during query processing if needed
+            chunk_metadata = []
+            for i, chunk in enumerate(chunks):
+                metadata = {
+                    'chunk_id': f"{doc_id}_chunk_{i}",
+                    'document_id': doc_id,
+                    'filename': file_info['filename'],
+                    'file_type': file_info['extension'],
+                    'chunk_index': i,
+                    'chunk_length': len(chunk),
+                    'source': f"{file_info['filename']}:chunk_{i}",
+                    'topics_analyzed': False,
+                    'semantic_description': '',  # Will be generated during query if needed
+                    'keywords': []  # Will be generated during query if needed
+                }
+                chunk_metadata.append(metadata)
             
             chunk_embeddings = create_embeddings_with_method(
                 chunks, 
                 rag_state.config['embedding_method']
             )
             
+            # Convert list of numpy arrays to single 2D numpy array for FAISS
+            if chunk_embeddings and isinstance(chunk_embeddings, list):
+                chunk_embeddings = np.vstack(chunk_embeddings)
+            
             # Track the actual embedding method used (including fallbacks)
             # Determine which method was actually used based on embedding dimensions
-            if len(chunk_embeddings) > 0:
-                embedding_dim = chunk_embeddings[0].shape[0] if hasattr(chunk_embeddings[0], 'shape') else len(chunk_embeddings[0])
+            if chunk_embeddings is not None and chunk_embeddings.shape[0] > 0:
+                embedding_dim = chunk_embeddings.shape[1]  # Now it's a 2D array
                 if embedding_dim == 384:  # Sentence transformer dimension
                     rag_state.actual_embedding_method = 'sentence_transformer'
                 else:  # TF-IDF or other
@@ -229,11 +239,8 @@ def upload_document():
                 file_type=file_info['extension']
             )
             
-            # Add embeddings to vector store (with metadata if available)
-            if chunk_metadata:
-                rag_state.vector_store.add_documents(chunks, chunk_embeddings, metadata=chunk_metadata)
-            else:
-                rag_state.vector_store.add_documents(chunks, chunk_embeddings)
+            # Add embeddings to vector store with basic metadata
+            rag_state.vector_store.add_documents(chunks, chunk_embeddings, metadata=chunk_metadata)
             
             # Update analytics
             rag_state.update_analytics('chunking', method=rag_state.config['chunking_method'])
@@ -254,9 +261,8 @@ def upload_document():
                 }
             }
             
-            # Add metadata info if generated
-            if chunk_metadata:
-                response_data['metadata_generated'] = len([m for m in chunk_metadata if m['topics_analyzed']])
+            # Metadata structure created (but LLM analysis will be done during query)
+            response_data['metadata_structure_created'] = len(chunk_metadata)
             
             return jsonify(response_data), 200
             
@@ -305,20 +311,31 @@ def ingest_document():
             **rag_state.config
         )
         
-        # Generate metadata if advanced retrieval is enabled
-        chunk_metadata = None
-        enable_metadata = rag_state.config.get('retrieval_method') == 'advanced'
-        if enable_metadata:
-            logger.info("Generating metadata for ingested text chunks")
-            chunk_metadata = generate_chunk_metadata(
-                chunks, doc_id, "text_input", "text",
-                enable_llm_analysis=True
-            )
+        # Create basic metadata structure without LLM analysis
+        chunk_metadata = []
+        for i, chunk in enumerate(chunks):
+            metadata = {
+                'chunk_id': f"{doc_id}_chunk_{i}",
+                'document_id': doc_id,
+                'filename': "text_input",
+                'file_type': "text",
+                'chunk_index': i,
+                'chunk_length': len(chunk),
+                'source': f"text_input:chunk_{i}",
+                'topics_analyzed': False,
+                'semantic_description': '',  # Will be generated during query if needed
+                'keywords': []  # Will be generated during query if needed
+            }
+            chunk_metadata.append(metadata)
         
         chunk_embeddings = create_embeddings_with_method(
             chunks, 
             rag_state.config['embedding_method']
         )
+        
+        # Convert list of numpy arrays to single 2D numpy array for FAISS
+        if chunk_embeddings and isinstance(chunk_embeddings, list):
+            chunk_embeddings = np.vstack(chunk_embeddings)
         
         # Add document to state
         rag_state.add_document(
@@ -327,11 +344,8 @@ def ingest_document():
             chunks=chunks
         )
         
-        # Add embeddings to vector store (with metadata if available)
-        if chunk_metadata:
-            rag_state.vector_store.add_documents(chunks, chunk_embeddings, metadata=chunk_metadata)
-        else:
-            rag_state.vector_store.add_documents(chunks, chunk_embeddings)
+        # Add embeddings to vector store with basic metadata
+        rag_state.vector_store.add_documents(chunks, chunk_embeddings, metadata=chunk_metadata)
         
         # Update analytics
         rag_state.update_analytics('chunking', method=rag_state.config['chunking_method'])
@@ -352,9 +366,8 @@ def ingest_document():
             'total_chunks': len(rag_state.all_chunks)
         }
         
-        # Add metadata info if generated
-        if chunk_metadata:
-            response_data['metadata_generated'] = len([m for m in chunk_metadata if m['topics_analyzed']])
+        # Metadata structure created (but LLM analysis will be done during query)
+        response_data['metadata_structure_created'] = len(chunk_metadata)
         
         return jsonify(response_data), 200
         

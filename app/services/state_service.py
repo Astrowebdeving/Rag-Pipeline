@@ -22,8 +22,8 @@ class RAGSystemState:
             'chunking_method': 'adaptive',  # Use adaptive chunking for better performance
             'embedding_method': 'sentence_transformer',  # Use neural embeddings for better semantic understanding
             'retrieval_method': 'advanced',  # Use advanced retrieval with re-ranking
-            'generation_method': 'huggingface',  # Enable AI generation for synthesized answers
-            'generation_model': 'google/flan-t5-large',  # Use FLAN-T5-large for better technical synthesis
+            'generation_method': 'ollama',  # Use Ollama for AI generation
+            'generation_model': 'deepseek-r1:8b',  # Use DeepSeek R1 8B model
             # Advanced configuration options
             'chunk_size': 800,  # Target chunk size for adaptive chunking
             'min_chunk_size': 100,  # Minimum chunk size
@@ -34,7 +34,8 @@ class RAGSystemState:
             'diversity_factor': 0.3,  # Diversity factor for result filtering
             'batch_size': 1000,  # Batch size for processing large datasets
             'enable_analytics': True,  # Enable analytics tracking
-            'cache_embeddings': True  # Enable embedding caching
+            'cache_embeddings': True,  # Enable embedding caching
+            'detailed_logging': True  # Enable detailed logging of LLM responses and chunks
         }
         
         # Log the configuration being loaded for debugging
@@ -44,7 +45,7 @@ class RAGSystemState:
         self.valid_chunking = ['semantic', 'fixed_length', 'adaptive']
         self.valid_embedding = ['sentence_transformer', 'tfidf', 'huggingface']
         self.valid_retrieval = ['dense', 'hybrid', 'advanced']
-        self.valid_generation = ['huggingface', 'ollama']  # Include ollama
+        self.valid_generation = ['none', 'huggingface', 'ollama']  # Include all available generators
         
         # System data storage
         self.documents = {}  # Store processed documents by ID
@@ -107,7 +108,7 @@ class RAGSystemState:
         valid_chunking = ['semantic', 'fixed_length', 'adaptive']
         valid_embedding = ['tfidf', 'sentence_transformer']
         valid_retrieval = ['dense', 'hybrid', 'advanced']
-        valid_generation = ['huggingface', 'ollama']
+        valid_generation = ['none', 'huggingface', 'ollama']
         
         # Check if all provided values are valid
         for key, value in new_config.items():

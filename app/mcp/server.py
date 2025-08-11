@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 API_BASE_URL = "http://localhost:5000/api"
 DEFAULT_TIMEOUT = 30.0
 
+# Get API key from environment
+import os
+API_KEY = os.environ.get('RAG_API_KEY', '')
+
+def get_headers():
+    """Get headers with API key if available."""
+    headers = {}
+    if API_KEY:
+        headers['X-API-Key'] = API_KEY
+    return headers
+
 class DocumentInfo(BaseModel):
     """Information about a processed document."""
     document_id: str = Field(description="The unique document identifier")
@@ -91,7 +102,8 @@ async def upload_document(
             response = await client.post(
                 f"{API_BASE_URL}/documents/upload",
                 files=files,
-                data=data
+                data=data,
+                headers=get_headers()
             )
             response.raise_for_status()
             result = response.json()
@@ -133,7 +145,7 @@ async def ingest_text(
     
     try:
         data = {
-            'content': content,
+            'text': content,
             'document_name': document_name,
             'chunking_method': chunking_method,
             'embedding_method': embedding_method
@@ -142,7 +154,8 @@ async def ingest_text(
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             response = await client.post(
                 f"{API_BASE_URL}/documents/ingest",
-                json=data
+                json=data,
+                headers=get_headers()
             )
             response.raise_for_status()
             result = response.json()
@@ -190,7 +203,8 @@ async def query_knowledge(
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             response = await client.post(
                 f"{API_BASE_URL}/query",
-                json=data
+                json=data,
+                headers=get_headers()
             )
             response.raise_for_status()
             result = response.json()

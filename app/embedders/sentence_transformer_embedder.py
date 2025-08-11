@@ -170,11 +170,12 @@ class SentenceTransformerEmbedder:
             # Create embeddings
             embeddings = _model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
             
-            # Return single embedding or list
+            # Return single embedding or list of numpy arrays
             if is_single:
                 return embeddings[0] if len(embeddings) > 0 else None
             else:
-                return list(embeddings)
+                # Convert to list of individual numpy arrays
+                return [np.array(emb) for emb in embeddings]
                 
         except Exception as e:
             logger.error(f"Error creating embeddings: {e}")

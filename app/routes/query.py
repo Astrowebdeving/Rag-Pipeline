@@ -173,6 +173,11 @@ def query_documents():
         if query_embedding is None:
             return jsonify({'error': 'Failed to create query embedding'}), 500
         
+        # Debug information
+        logger.info(f"Vector store has {rag_state.vector_store.get_document_count()} documents")
+        logger.info(f"Total chunks in system: {len(rag_state.all_chunks)}")
+        logger.info(f"Using retrieval method: {rag_state.config['retrieval_method']}")
+        
         # Retrieve relevant chunks using configured method
         retriever = create_retriever_with_method(rag_state.config['retrieval_method'])
         
@@ -181,6 +186,7 @@ def query_documents():
         
         try:
             if rag_state.config['retrieval_method'] == 'advanced':
+                # For advanced retriever, pass query text as well
                 chunks_with_scores = retriever.retrieve_with_scores(
                     rag_state.vector_store, query_embedding, query, top_k
                 )
@@ -197,9 +203,12 @@ def query_documents():
             if chunks_with_scores is None:
                 chunks_with_scores = []
                 logger.warning("Retriever returned None, using empty list")
+            else:
+                logger.info(f"Retriever found {len(chunks_with_scores)} candidate chunks")
                 
         except Exception as retrieval_error:
             logger.error(f"Retrieval failed: {str(retrieval_error)}")
+            logger.error(traceback.format_exc())
             chunks_with_scores = []
         
         # Update analytics
@@ -207,6 +216,12 @@ def query_documents():
         
         # Validate and filter chunks for quality
         validated_chunks = validate_chunk_relevance(chunks_with_scores, query)
+        
+        # Log retrieved chunks for debugging (if detailed logging is enabled)
+        if rag_state.config.get('detailed_logging', True):
+            logger.info(f"Validated chunks for query '{query[:50]}...':")
+            for i, (chunk, score) in enumerate(validated_chunks, 1):
+                logger.info(f"  Chunk {i} (score: {score:.4f}): {chunk[:100]}..." if len(chunk) > 100 else f"  Chunk {i} (score: {score:.4f}): {chunk}")
         
         # Prepare response data
         response_data = {
@@ -235,21 +250,42 @@ def query_documents():
                 chunk_texts = [chunk for chunk, _ in validated_chunks]
                 
                 if chunk_texts:
-                    # Generate response using LLM
-                    generation_result = generator.generate_response(query, chunk_texts)
+                    logger.info(f"Generating response using {rag_state.config['generation_method']} with {len(chunk_texts)} chunks")
+                    
+                    # Generate response using LLM with retrieved chunks
+                    generation_result = generator.generate_response(query, retrieved_chunks=chunk_texts)
                     
                     if generation_result.get('success'):
                         response_data['generated_response'] = generation_result['response']
                         response_data['model_used'] = generation_result.get('model_used', generation_result.get('model', 'unknown'))
                         response_data['generation_method'] = rag_state.config['generation_method']
-                        rag_state.analytics['successful_generations'] += 1
+                        # Update analytics safely
+                        if hasattr(rag_state, 'analytics') and 'successful_generations' in rag_state.analytics:
+                            rag_state.analytics['successful_generations'] += 1
+                        
+                        # Log the full generated response for the user (if detailed logging is enabled)
+                        full_response = generation_result['response']
+                        logger.info(f"Successfully generated response using {rag_state.config['generation_method']}")
+                        
+                        if rag_state.config.get('detailed_logging', True):
+                            logger.info(f"Query: '{query}'")
+                            logger.info(f"Retrieved Chunks Used ({len(chunk_texts)}):")
+                            for i, chunk in enumerate(chunk_texts, 1):
+                                logger.info(f"  Chunk {i}: {chunk[:100]}..." if len(chunk) > 100 else f"  Chunk {i}: {chunk}")
+                            logger.info(f"Full LLM Response:\n{'-' * 50}\n{full_response}\n{'-' * 50}")
                     else:
-                        response_data['generation_error'] = generation_result.get('error', 'Unknown error')
-                        rag_state.analytics['failed_generations'] += 1
+                        error_msg = generation_result.get('error', 'Unknown error')
+                        response_data['generation_error'] = f"AI Generation Issue: {error_msg}"
+                        # Update analytics safely
+                        if hasattr(rag_state, 'analytics') and 'failed_generations' in rag_state.analytics:
+                            rag_state.analytics['failed_generations'] += 1
+                        logger.error(f"Generation failed: {error_msg}")
                 else:
                     response_data['generation_error'] = 'No relevant chunks found for generation'
+                    logger.warning("No chunks available for generation")
             else:
-                response_data['generation_error'] = 'No generator available'
+                response_data['generation_error'] = 'No AI generator available'
+                logger.error("No generator available for response generation")
         
         logger.info(f"Query processed: '{query[:50]}...' -> {len(validated_chunks)} chunks")
         
