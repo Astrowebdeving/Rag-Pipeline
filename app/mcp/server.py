@@ -55,6 +55,14 @@ class SystemStatus(BaseModel):
     embedding_method: str = Field(description="Current embedding method")
     embedding_dimensions: int = Field(description="Embedding vector dimensions")
 
+class ChunkPage(BaseModel):
+    """A page of stored chunks."""
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    chunks: List[Dict[str, Any]]
+
 # Create the MCP server
 mcp = FastMCP("RAG System MCP Server")
 
@@ -339,3 +347,31 @@ def get_mcp_server() -> FastMCP:
     """Get the configured MCP server instance."""
     logger.info("RAG System MCP Server initialized")
     return mcp 
+
+
+@mcp.tool()
+async def list_chunks(page: int = 1, page_size: int = 5, ctx: Context = None) -> ChunkPage:
+    """
+    List currently stored chunks in pages.
+
+    Args:
+        page: 1-based page index (default 1)
+        page_size: number of chunks per page (default 5)
+    """
+    if ctx:
+        await ctx.info(f"Listing chunks page {page} (size {page_size})")
+    try:
+        params = { 'page': page, 'page_size': page_size }
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            response = await client.get(
+                f"{API_BASE_URL}/chunks",
+                params=params,
+                headers=get_headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+        return ChunkPage(**data)
+    except Exception as e:
+        if ctx:
+            await ctx.error(f"Failed to list chunks: {str(e)}")
+        raise Exception(f"List chunks failed: {str(e)}")

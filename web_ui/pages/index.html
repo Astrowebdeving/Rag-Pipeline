@@ -247,6 +247,41 @@
             margin-top: 15px;
         }
 
+        /* Feedback modal */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal {
+            background: #fff;
+            width: 95%;
+            max-width: 560px;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .modal-header {
+            background: #1e40af;
+            color: white;
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .modal-body { padding: 18px 20px; }
+        .modal-actions { padding: 14px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+        .close-btn { background: transparent; border: none; color: #fff; font-size: 20px; cursor: pointer; }
+
+        /* Star rating */
+        .stars { display: inline-flex; gap: 6px; cursor: pointer; }
+        .star { font-size: 24px; color: #d1d5db; cursor: pointer; user-select: none; display: inline-block; }
+        .star.selected, .star.hover { color: #f59e0b; }
+
         .system-status {
             background: #f8fafc;
             padding: 15px;
@@ -310,6 +345,9 @@
                     <button class="btn" onclick="uploadFile()">
                         Upload & Process File
                     </button>
+                    <button class="btn" style="background:#ef4444; margin-left:10px;" onclick="clearAllData()">
+                        Clear All Documents & Chunks
+                    </button>
                 </div>
 
                 <!-- Text Input Option -->
@@ -340,9 +378,39 @@
         </div>
     </div>
 
+    <!-- Feedback Modal -->
+    <div id="feedbackOverlay" class="modal-overlay">
+      <div class="modal">
+        <div class="modal-header">
+          <div>
+            <strong>Share Feedback</strong>
+          </div>
+          <button class="close-btn" onclick="hideFeedbackModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-bottom:10px;color:#374151;">How helpful was this answer?</p>
+          <div id="ratingStars" class="stars" aria-label="Rating">
+            <span class="star" data-value="1">★</span>
+            <span class="star" data-value="2">★</span>
+            <span class="star" data-value="3">★</span>
+            <span class="star" data-value="4">★</span>
+            <span class="star" data-value="5">★</span>
+          </div>
+          <textarea id="feedbackComments" placeholder="Optional: Tell us what to improve (factuality, style, missing info, etc.)" style="margin-top:12px; min-height:100px;"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="submitFeedback()">Submit Feedback</button>
+          <button class="btn" style="background:#6b7280" onclick="hideFeedbackModal()">Close</button>
+        </div>
+      </div>
+    </div>
+
     <script>
         // Global state management
         let systemConfig = null;
+        let lastQueryPayload = null;
+        let lastQueryResponse = null;
+        let selectedRating = 0;
 
         // Initialize the application
         document.addEventListener('DOMContentLoaded', function() {
@@ -535,6 +603,8 @@
 
                 if (response.ok) {
                     displayQueryResult(result);
+                    lastQueryPayload = { query };
+                    lastQueryResponse = result;
                 } else {
                     showMessage(`Error: ${result.error}`, 'error', 'queryResult');
                 }
@@ -553,6 +623,10 @@
             const resultDiv = document.getElementById('queryResult');
             
             let html = '<div class="response-area">';
+            html += '<div style="display:flex; justify-content: space-between; align-items:center; margin-bottom:8px;">'
+                 + '<div></div>'
+                 + '<button class="btn" style="background:#6b7280" onclick="clearQueryResult()">✕ Close Result</button>'
+                 + '</div>';
             // Fix field name mismatch - use query_processed instead of query
             html += `<h3>Results for: "${result.query_processed || result.query || 'your query'}"</h3>`;
 
@@ -608,8 +682,181 @@
                 html += '</div>';
             }
 
+            // Inline feedback area
+            html += '<div style="margin-top:20px; padding-top:15px; border-top:1px solid #e5e7eb;">';
+            html += '<h4 style="margin-bottom:10px; color:#374151; display:flex; align-items:center; gap:8px;">Feedback</h4>';
+            html += '<div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">';
+            html += '<span>Rating:</span>';
+            html += '<span class="star" data-value="1">★</span>';
+            html += '<span class="star" data-value="2">★</span>';
+            html += '<span class="star" data-value="3">★</span>';
+            html += '<span class="star" data-value="4">★</span>';
+            html += '<span class="star" data-value="5">★</span>';
+            html += '</div>';
+            html += '<textarea id="feedbackComments" placeholder="Optional: What should be improved (factuality, style, missing info, etc.)" style="min-height:80px;"></textarea>';
+            html += '<div style="display:flex; gap:10px; margin-top:10px;">';
+            html += '<button class="btn" onclick="submitFeedbackInline()">Submit Feedback</button>';
+            html += '<button class="btn" style="background:#6b7280" onclick="clearFeedbackOnly()">✕ Close Feedback</button>';
+            html += '</div>';
+            html += '</div>';
+
             html += '</div>';
             resultDiv.innerHTML = html;
+
+            // Attach star handlers
+            const stars = document.querySelectorAll('#queryResult .star');
+            stars.forEach(star => {
+              star.classList.remove('selected','hover');
+              star.addEventListener('mouseenter', handleStarHover);
+              star.addEventListener('mouseleave', clearStarHover);
+              star.addEventListener('click', handleStarClick);
+            });
+        }
+
+        function clearQueryResult() {
+          document.getElementById('queryResult').innerHTML = '';
+        }
+
+        function clearFeedbackOnly() {
+          const fb = document.getElementById('feedbackComments');
+          if (fb) fb.value = '';
+          document.querySelectorAll('#queryResult .star').forEach(star => star.classList.remove('selected','hover'));
+          selectedRating = 0;
+        }
+
+        async function submitFeedbackInline() {
+          try {
+            if (!lastQueryResponse || !lastQueryPayload) return;
+            if (!selectedRating) { alert('Please select a star rating'); return; }
+            const apiKeyHeader = window.RAG_API_KEY ? { 'X-API-Key': window.RAG_API_KEY } : {};
+            const body = {
+              user_id: 'webui',
+              query: lastQueryPayload.query,
+              answer: lastQueryResponse.generated_response || '',
+              rating: selectedRating,
+              comments: (document.getElementById('feedbackComments')?.value || '').trim(),
+              modules_used: lastQueryResponse.modules_used || {
+                chunker: (systemConfig && systemConfig.chunking_method) || 'adaptive',
+                retriever: (systemConfig && systemConfig.retrieval_method) || 'advanced',
+                generator: (systemConfig && systemConfig.generation_method) || 'ollama',
+                generation_model: (systemConfig && systemConfig.generation_model) || 'deepseek-r1:8b'
+              },
+              context_embedding: null,
+              latency_ms: null,
+              session_id: null
+            };
+            const resp = await fetch('/api/feedback', { method: 'POST', headers: { ...apiKeyHeader, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            if (resp.ok) {
+              showMessage('Thanks for your feedback!', 'success', 'queryResult');
+            } else {
+              const err = await resp.json().catch(() => ({error:'Unknown error'}));
+              alert('Failed to submit feedback: ' + (err.error || 'Unknown error'));
+            }
+          } catch (e) {
+            alert('Network error submitting feedback: ' + e.message);
+          }
+        }
+
+        async function clearAllData() {
+          if (!confirm('This will clear all uploaded documents, chunks, and embeddings. Continue?')) return;
+          try {
+            const apiKeyHeader = window.RAG_API_KEY ? { 'X-API-Key': window.RAG_API_KEY } : {};
+            const resp = await fetch('/api/clear', { method: 'POST', headers: { ...apiKeyHeader } });
+            if (resp.ok) {
+              showMessage('All data cleared successfully.', 'success', 'uploadResult');
+              checkHealth();
+              clearQueryResult();
+            } else {
+              const err = await resp.json().catch(() => ({error:'Unknown error'}));
+              showMessage('Failed to clear: ' + (err.error || 'Unknown error'), 'error', 'uploadResult');
+            }
+          } catch (e) {
+            showMessage('Network error clearing data: ' + e.message, 'error', 'uploadResult');
+          }
+        }
+
+        // Feedback modal controls
+        function showFeedbackModal() {
+          selectedRating = 0;
+          const overlay = document.getElementById('feedbackOverlay');
+          overlay.style.display = 'flex';
+          const stars = document.querySelectorAll('#ratingStars .star');
+          stars.forEach(star => {
+            star.classList.remove('selected','hover');
+            star.addEventListener('mouseenter', handleStarHover);
+            star.addEventListener('mouseleave', clearStarHover);
+            star.addEventListener('click', handleStarClick);
+          });
+        }
+
+        function hideFeedbackModal() {
+          document.getElementById('feedbackOverlay').style.display = 'none';
+          document.getElementById('feedbackComments').value = '';
+        }
+
+        function handleStarHover(e) {
+          const val = parseInt(e.target.getAttribute('data-value'));
+          // Use stars within queryResult feedback area
+          document.querySelectorAll('#queryResult .star').forEach(star => {
+            const sVal = parseInt(star.getAttribute('data-value'));
+            star.classList.toggle('hover', sVal <= val);
+          });
+        }
+
+        function clearStarHover() {
+          document.querySelectorAll('#queryResult .star').forEach(star => star.classList.remove('hover'));
+        }
+
+        function handleStarClick(e) {
+          selectedRating = parseInt(e.target.getAttribute('data-value'));
+          document.querySelectorAll('#queryResult .star').forEach(star => {
+            const sVal = parseInt(star.getAttribute('data-value'));
+            star.classList.toggle('selected', sVal <= selectedRating);
+          });
+        }
+
+        async function submitFeedback() {
+          try {
+            if (!lastQueryResponse || !lastQueryPayload) {
+              hideFeedbackModal();
+              return;
+            }
+            if (!selectedRating) {
+              alert('Please select a star rating');
+              return;
+            }
+            const apiKeyHeader = window.RAG_API_KEY ? { 'X-API-Key': window.RAG_API_KEY } : {};
+            const body = {
+              user_id: 'webui',
+              query: lastQueryPayload.query,
+              answer: lastQueryResponse.generated_response || '',
+              rating: selectedRating,
+              comments: document.getElementById('feedbackComments').value.trim(),
+              modules_used: lastQueryResponse.modules_used || {
+                chunker: (systemConfig && systemConfig.chunking_method) || 'adaptive',
+                retriever: (systemConfig && systemConfig.retrieval_method) || 'advanced',
+                generator: (systemConfig && systemConfig.generation_method) || 'ollama',
+                generation_model: (systemConfig && systemConfig.generation_model) || 'deepseek-r1:8b'
+              },
+              context_embedding: null,
+              latency_ms: null,
+              session_id: null
+            };
+            const resp = await fetch('/api/feedback', {
+              method: 'POST',
+              headers: { ...apiKeyHeader, 'Content-Type': 'application/json' },
+              body: JSON.stringify(body)
+            });
+            if (resp.ok) {
+              hideFeedbackModal();
+              showMessage('Thanks for your feedback!', 'success', 'queryResult');
+            } else {
+              const err = await resp.json().catch(() => ({error:'Unknown error'}));
+              alert('Failed to submit feedback: ' + (err.error || 'Unknown error'));
+            }
+          } catch (e) {
+            alert('Network error submitting feedback: ' + e.message);
+          }
         }
 
         // Show message helper

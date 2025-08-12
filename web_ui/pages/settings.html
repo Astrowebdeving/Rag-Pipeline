@@ -262,15 +262,28 @@
             </form>
 
             <div id="message"></div>
+
+            <div class="setting-group" style="margin-top:20px;">
+                <h3>Stored Chunks</h3>
+                <p class="description">Browse currently stored chunks (5 per page)</p>
+                <div style="display:flex; gap:8px; align-items:center; margin:10px 0;">
+                    <button type="button" class="btn" onclick="prevChunkPage()">◀ Prev</button>
+                    <span id="chunkPageInfo" style="color:#6b7280;">Page 1</span>
+                    <button type="button" class="btn" onclick="nextChunkPage()">Next ▶</button>
+                </div>
+                <div id="chunkList" class="description" style="white-space:pre-wrap; line-height:1.5;"></div>
+            </div>
         </div>
     </div>
 
     <script>
         let currentConfig = {};
+        let chunkPage = 1;
 
         // Load current configuration on page load
         document.addEventListener('DOMContentLoaded', function() {
             loadCurrentConfig();
+            loadChunkPage(1);
         });
 
         // Load current configuration from API
@@ -285,6 +298,29 @@
             } catch (error) {
                 showMessage('Failed to load current settings', 'error');
             }
+        }
+
+        async function loadChunkPage(page) {
+            try {
+                const apiKeyHeader = window.RAG_API_KEY ? { 'X-API-Key': window.RAG_API_KEY } : {};
+                const resp = await fetch(`/api/chunks?page=${page}&page_size=5`, { headers: apiKeyHeader });
+                const data = await resp.json();
+                if (!resp.ok) { document.getElementById('chunkList').textContent = data.error || 'Error loading chunks'; return; }
+                chunkPage = data.page;
+                document.getElementById('chunkPageInfo').textContent = `Page ${data.page} / ${data.total_pages} (Total ${data.total})`;
+                const lines = data.chunks.map(c => `#${c.index} (${c.length} chars)\n${c.text}`);
+                document.getElementById('chunkList').textContent = lines.join('\n\n---\n\n');
+            } catch (e) {
+                document.getElementById('chunkList').textContent = 'Network error: ' + e.message;
+            }
+        }
+
+        function prevChunkPage() {
+            if (chunkPage > 1) loadChunkPage(chunkPage - 1);
+        }
+
+        function nextChunkPage() {
+            loadChunkPage(chunkPage + 1);
         }
 
         // Update form fields based on configuration

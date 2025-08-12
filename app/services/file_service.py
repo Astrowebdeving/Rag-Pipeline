@@ -152,10 +152,41 @@ class FileProcessingService:
             
             for page_num, page in enumerate(pdf.pages, 1):
                 try:
-                    page_text = page.extract_text()
+                    # Heuristic multi-column handling: split page into left/right halves
+                    # only if the word distribution suggests columns
+                    words = []
+                    try:
+                        words = page.extract_words()
+                    except Exception:
+                        words = []
+
+                    use_two_cols = False
+                    if words:
+                        width = getattr(page, 'width', None)
+                        if width:
+                            mid_x = width / 2.0
+                            left = sum(1 for w in words if ((w.get('x0', 0) + w.get('x1', 0)) / 2.0) < mid_x)
+                            right = len(words) - left
+                            # Both sides should have a reasonable share to consider it two-column
+                            if left > 0 and right > 0 and min(left, right) / max(left, right) > 0.3:
+                                use_two_cols = True
+
+                    if use_two_cols:
+                        width = page.width
+                        height = page.height
+                        left_box = (0, 0, width * 0.5, height)
+                        right_box = (width * 0.5, 0, width, height)
+                        left_page = page.crop(left_box)
+                        right_page = page.crop(right_box)
+                        left_text = left_page.extract_text() or ''
+                        right_text = right_page.extract_text() or ''
+                        page_text = (left_text.strip() + ("\n\n" if left_text and right_text else "") + right_text.strip()).strip()
+                    else:
+                        page_text = page.extract_text() or ''
+
                     if page_text:
                         text_content.append(page_text)
-                        logger.debug(f"Extracted {len(page_text)} characters from page {page_num}")
+                        logger.debug(f"Extracted {len(page_text)} characters from page {page_num}{' (2-col)' if use_two_cols else ''}")
                     else:
                         logger.warning(f"No text found on page {page_num}")
                 except Exception as e:

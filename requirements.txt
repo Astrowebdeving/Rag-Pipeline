@@ -39,6 +39,7 @@ flask-cors>=4.0.0,<5.0.0  # Enable CORS for frontend access
 flask-restful>=0.3.10,<0.4.0  # RESTful API utilities
 python-multipart>=0.0.6,<1.0.0  # File upload support
 gunicorn>=21.2.0,<22.0.0  # Production WSGI server
+SQLAlchemy>=2.0.0,<3.0.0  # Feedback DB ORM
 
 # FILE PROCESSING DEPENDENCIES
 PyPDF2>=3.0.0,<4.0.0  # PDF text extraction

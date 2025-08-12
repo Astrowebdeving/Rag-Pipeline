@@ -15,7 +15,7 @@ class OllamaGenerator:
     """Generator that uses Ollama for local LLM inference."""
     
     def __init__(
-        self,
+        self, 
         model_name: str = "deepseek-r1:8b",
         base_url: str = "http://localhost:11434",
         max_tokens: int = 3000,
@@ -91,10 +91,13 @@ class OllamaGenerator:
             return False  # Return False if connection fails
     
     def generate_response(
-        self,
-        query: str,
+        self, 
+        query: str, 
         retrieved_chunks: List[str],
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        max_tokens_override: Optional[int] = None,
+        suppress_info_log: bool = False,
+        allow_partial_on_timeout: bool = False,
     ) -> Dict[str, Any]:
         """Generate response using Ollama.
         
@@ -110,7 +113,7 @@ class OllamaGenerator:
             # Build context from retrieved chunks
             context = "\n\n".join(retrieved_chunks) if retrieved_chunks else ""
             
-            # Create the prompt
+            # Create the prompt (support system prompt)
             if system_prompt:
                 prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
             else:
@@ -120,16 +123,20 @@ class OllamaGenerator:
                     prompt = f"Question: {query}\n\nAnswer:"
             
             # Prepare request payload
-            # For DeepSeek-R1, we need much higher token limits and no stop tokens
-            # to allow for complete thinking process + final answer
+            # For DeepSeek-R1, we normally use higher token limits to allow thinking + final answer
+            # but honor per-call overrides for short tasks (query enhancement/metadata).
             is_deepseek = "deepseek" in self.model_name.lower()
             
             payload = {
                 "model": self.model_name,
                 "prompt": prompt,
-                "stream": False,
+                "stream": bool(allow_partial_on_timeout),
                 "options": {
-                    "num_predict": max(self.max_tokens, 3000) if is_deepseek else self.max_tokens,
+                    "num_predict": (
+                        int(max_tokens_override)
+                        if max_tokens_override is not None
+                        else (max(self.max_tokens, 3000) if is_deepseek else self.max_tokens)
+                    ),
                     "temperature": self.temperature,
                     "top_p": 0.9,
                     # Remove stop tokens for DeepSeek-R1 to allow complete thinking process
@@ -139,21 +146,72 @@ class OllamaGenerator:
             
             logger.debug(f"Sending request to Ollama with model: {self.model_name}")
             
-            # Make request to Ollama
+            # Make request to Ollama (streaming if partials allowed)
+            if allow_partial_on_timeout:
+                partial_text = ""
+                try:
+                    with requests.post(
+                        f"{self.base_url}/api/generate",
+                        json=payload,
+                        timeout=self.timeout,
+                        stream=True,
+                    ) as response:
+                        if response.status_code != 200:
+                            error_msg = f"Ollama API error: {response.status_code}"
+                            logger.error(error_msg)
+                            return { 'success': False, 'error': error_msg, 'response': '' }
+                        for line in response.iter_lines(decode_unicode=True):
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except Exception:
+                                continue
+                            chunk = data.get('response', '')
+                            if chunk:
+                                partial_text += chunk
+                            if data.get('done'):
+                                break
+                except requests.exceptions.ReadTimeout:
+                    logger.warning(f"Ollama stream read timeout after {self.timeout}s; returning partial")
+                except requests.exceptions.Timeout:
+                    logger.warning(f"Ollama request timeout after {self.timeout}s; returning partial")
+
+                partial_text = partial_text.strip()
+                if partial_text:
+                    final_answer = self._extract_final_answer(partial_text)
+                    log_msg = (
+                        f"Generated (partial-capable) response with {len(partial_text)} characters, final answer: {len(final_answer)} characters"
+                    )
+                    if suppress_info_log:
+                        logger.debug(log_msg)
+                    else:
+                        logger.info(log_msg)
+                    return { 'success': True, 'response': final_answer, 'model': self.model_name }
+                else:
+                    return { 'success': False, 'error': 'Empty response from Ollama', 'response': '' }
+
+            # Non-streaming path (no partials)
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=self.timeout
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 generated_text = result.get('response', '').strip()
-                
+
                 if generated_text:
                     # Special handling for DeepSeek-R1 models that use thinking process
                     final_answer = self._extract_final_answer(generated_text)
-                    logger.info(f"Generated response with {len(generated_text)} characters, final answer: {len(final_answer)} characters")
+                    log_msg = (
+                        f"Generated response with {len(generated_text)} characters, final answer: {len(final_answer)} characters"
+                    )
+                    if suppress_info_log:
+                        logger.debug(log_msg)
+                    else:
+                        logger.info(log_msg)
                     return {
                         'success': True,
                         'response': final_answer,
@@ -176,6 +234,9 @@ class OllamaGenerator:
                 }
                 
         except requests.exceptions.Timeout:
+            # Best-effort partial extraction: try to return any partial text if available
+            # Note: requests timeout aborts before body is read; if server streamed, partial text would be lost.
+            # For true partials, switch to streaming mode and accumulate chunks.
             error_msg = f"Ollama request timeout after {self.timeout}s"
             logger.error(error_msg)
             return {
@@ -202,7 +263,7 @@ class OllamaGenerator:
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the current model.
-        
+            
         Returns:
             Dict containing model information
         """
@@ -216,7 +277,7 @@ class OllamaGenerator:
     
     def is_available(self) -> bool:
         """Check if the generator is available.
-        
+            
         Returns:
             bool: True if Ollama and model are available
         """

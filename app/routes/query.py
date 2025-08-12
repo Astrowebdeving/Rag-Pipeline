@@ -239,6 +239,13 @@ def query_documents():
                 'top_k': top_k,
                 'retrieval_method': rag_state.config['retrieval_method'],
                 'embedding_method': rag_state.config['embedding_method']
+            },
+            # Add modules_used to support feedback collection
+            'modules_used': {
+                'chunker': rag_state.config.get('chunking_method'),
+                'retriever': rag_state.config.get('retrieval_method'),
+                'generator': rag_state.config.get('generation_method'),
+                'generation_model': rag_state.config.get('generation_model'),
             }
         }
         
@@ -254,7 +261,13 @@ def query_documents():
                     logger.info(f"Generating response using {rag_state.config['generation_method']} with {len(chunk_texts)} chunks")
                     
                     # Generate response using LLM with retrieved chunks
-                    generation_result = generator.generate_response(query, retrieved_chunks=chunk_texts)
+                    system_prompt = rag_state.config.get('generation_system_prompt') or None
+                    generation_result = generator.generate_response(
+                        query,
+                        retrieved_chunks=chunk_texts,
+                        system_prompt=system_prompt,
+                        allow_partial_on_timeout=True
+                    )
                     
                     if generation_result.get('success'):
                         response_data['generated_response'] = generation_result['response']

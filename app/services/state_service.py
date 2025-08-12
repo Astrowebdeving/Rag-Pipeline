@@ -36,9 +36,19 @@ class RAGSystemState:
             'enable_analytics': True,  # Enable analytics tracking
             'cache_embeddings': True,  # Enable embedding caching
             'detailed_logging': True,  # Enable detailed logging of LLM responses and chunks
-            'llm_timeout': 60,  # LLM generation timeout in seconds (increased for DeepSeek-R1 thinking)
-            'llm_max_tokens': 2000  # Maximum tokens for LLM generation (increased for DeepSeek-R1 thinking + answer)
+            'llm_timeout': 90,  # LLM generation timeout in seconds (increased for final answers)
+            'llm_max_tokens': 2000,  # Maximum tokens for LLM generation (increased for DeepSeek-R1 thinking + answer)
+            'generation_system_prompt': ''  # Optional system prompt to prepend to LLM (protected)
         }
+
+        # Allow owner/operator to set a system prompt via environment variable only
+        try:
+            import os
+            env_prompt = os.environ.get('RAG_SYSTEM_PROMPT')
+            if env_prompt:
+                self.config['generation_system_prompt'] = env_prompt
+        except Exception:
+            pass
         
         # Log the configuration being loaded for debugging
         logger.info(f"RAG system initialized with enhanced configuration: {self.config}")
@@ -114,6 +124,10 @@ class RAGSystemState:
         
         # Check if all provided values are valid
         for key, value in new_config.items():
+            # Block public updates to protected keys
+            if key == 'generation_system_prompt':
+                logger.warning("Attempt to update protected key 'generation_system_prompt' via API was ignored")
+                continue
             if key == 'chunking_method' and value not in valid_chunking:
                 logger.error(f"Invalid chunking method: {value}")
                 return False

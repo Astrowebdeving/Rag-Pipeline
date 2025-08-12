@@ -100,15 +100,17 @@ class AdvancedRetriever:
         
         try:
             # Create a focused prompt for query enhancement
-            enhancement_prompt = f"""Expand this search query with related keywords and synonyms:
+            enhancement_prompt = f"""Expand this search query with related keywords and synonyms. Return a compact list of comma-separated terms only.
 
 Query: {original_query}
 
 Related terms:"""
             
             response_data = enhancer.generate_response(
-                query=enhancement_prompt, 
-                retrieved_chunks=[]  # Empty for query enhancement
+                query=enhancement_prompt,
+                retrieved_chunks=[],  # Empty for query enhancement
+                max_tokens_override=80,  # keep short to avoid long think loops
+                suppress_info_log=True,
             )
             
             enhanced_portion = response_data.get('response', '') if response_data.get('success', False) else ''
@@ -148,13 +150,18 @@ Related terms:"""
             if enhancer is None:
                 return chunk_metadata
             
-            analysis_prompt = f"""Analyze this text and provide a brief summary and key topics:
+            analysis_prompt = f"""Analyze this text and provide a brief summary and key topics. Keep under 3 sentences.
 
 Text: {chunk[:400]}
 
 Summary and keywords:"""
-            
-            response_data = enhancer.generate_response(query=analysis_prompt, retrieved_chunks=[])
+
+            response_data = enhancer.generate_response(
+                query=analysis_prompt,
+                retrieved_chunks=[],
+                max_tokens_override=120,
+                suppress_info_log=True,
+            )
             if response_data.get('success', False):
                 response = response_data.get('response', '').strip()
                 
@@ -174,10 +181,10 @@ Summary and keywords:"""
         return chunk_metadata
     
     def retrieve(
-        self, 
-        vector_store: BaseVectorStore, 
-        query_embedding: np.ndarray, 
-        query_text: str, 
+        self,
+        vector_store: BaseVectorStore,
+        query_embedding: np.ndarray,
+        query_text: str,
         top_k: int = 5,
         candidate_multiplier: int = 4
     ) -> List[str]:
@@ -277,10 +284,10 @@ Summary and keywords:"""
                 return []
     
     def retrieve_with_scores(
-        self, 
-        vector_store: BaseVectorStore, 
-        query_embedding: np.ndarray, 
-        query_text: str, 
+        self,
+        vector_store: BaseVectorStore,
+        query_embedding: np.ndarray,
+        query_text: str,
         top_k: int = 5
     ) -> List[Tuple[str, float]]:
         """Retrieve documents with similarity scores using advanced methods.
@@ -359,7 +366,7 @@ Summary and keywords:"""
                 # Sort by base score and return top_k
                 unique_candidates.sort(key=lambda x: x['base_score'], reverse=True)
                 return [(candidate['chunk'], candidate['base_score']) for candidate in unique_candidates[:top_k]]
-                
+            
         except Exception as e:
             logger.error(f"Advanced retrieval with scores failed: {e}")
             # Fallback to simple dense retrieval
@@ -480,9 +487,9 @@ Summary and keywords:"""
         return list(seen_chunks.values())
     
     def _rerank_candidates(
-        self, 
-        candidates: List[Dict[str, Any]], 
-        original_query: str, 
+        self,
+        candidates: List[Dict[str, Any]],
+        original_query: str,
         vector_store: BaseVectorStore
     ) -> List[Tuple[str, float]]:
         """Rerank candidates using multiple scoring factors.
@@ -791,4 +798,4 @@ def get_retriever_info() -> Dict[str, Any]:
         'supports_scoring': True,  # Whether retriever supports scoring
         'configurable': True,  # Whether retriever is configurable
         'description': 'Advanced retriever with query expansion, re-ranking, diversity filtering, and LLM enhancements'
-    }
+    } 

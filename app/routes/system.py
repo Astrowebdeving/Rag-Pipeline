@@ -195,3 +195,75 @@ def reset_analytics():
     except Exception as e:
         logger.error(f"Analytics reset failed: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+@system_bp.route('/clear', methods=['POST'])
+@require_api_key
+def clear_data():
+    """Clear all documents, chunks, and embeddings from the system."""
+    try:
+        before = {
+            'documents': rag_state.get_document_count(),
+            'chunks': rag_state.get_chunk_count(),
+            'vector_store': rag_state.vector_store.get_document_count() if hasattr(rag_state.vector_store, 'get_document_count') else 0
+        }
+        rag_state.clear_all_data()
+        after = {
+            'documents': rag_state.get_document_count(),
+            'chunks': rag_state.get_chunk_count(),
+            'vector_store': rag_state.vector_store.get_document_count() if hasattr(rag_state.vector_store, 'get_document_count') else 0
+        }
+        return jsonify({
+            'message': 'All data cleared successfully',
+            'before': before,
+            'after': after
+        }), 200
+    except Exception as e:
+        logger.error(f"Failed to clear data: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@system_bp.route('/chunks', methods=['GET'])
+def list_chunks():
+    """List stored chunks with simple pagination.
+
+    Query params:
+      - page: 1-based page index (default 1)
+      - page_size: number of chunks per page (default 5)
+    """
+    try:
+        # Parse pagination
+        try:
+            page = int(request.args.get('page', 1))
+            page_size = int(request.args.get('page_size', 5))
+        except ValueError:
+            return jsonify({'error': 'Invalid pagination parameters'}), 400
+
+        page = max(page, 1)
+        page_size = max(min(page_size, 50), 1)
+
+        chunks = rag_state.get_all_chunks()
+        total = len(chunks)
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+
+        start = (page - 1) * page_size
+        end = min(start + page_size, total)
+        items = []
+        for i in range(start, end):
+            text = chunks[i]
+            items.append({
+                'index': i,
+                'length': len(text),
+                'text': text,
+            })
+
+        return jsonify({
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'total_pages': total_pages,
+            'chunks': items,
+        }), 200
+    except Exception as e:
+        logger.error(f"Failed to list chunks: {str(e)}")
+        return jsonify({'error': str(e)}), 500

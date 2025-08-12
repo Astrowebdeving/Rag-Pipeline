@@ -67,6 +67,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 from app.routes.system import system_bp
 from app.routes.documents import documents_bp
 from app.routes.query import query_bp
+from app.routes.feedback import feedback_bp
+from app.routes.model import model_bp
 
 # Import services to initialize them
 from app.services.state_service import rag_state
@@ -76,6 +78,8 @@ from app.services.file_service import file_service
 app.register_blueprint(system_bp)
 app.register_blueprint(documents_bp)
 app.register_blueprint(query_bp)
+app.register_blueprint(feedback_bp)
+app.register_blueprint(model_bp)
 
 # Error handler for file size limit exceeded
 @app.errorhandler(413)
