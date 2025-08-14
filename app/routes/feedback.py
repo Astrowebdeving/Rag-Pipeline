@@ -2,6 +2,7 @@ import logging
 from flask import Blueprint, request, jsonify
 from app.utils.auth import require_api_key
 from app.personalization.models import create_session, Feedback
+from app.personalization.selector import update_bandits_from_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,11 @@ def submit_feedback():
         s.add(fb)
         s.commit()
         s.close()
+        # Update bandits from feedback asynchronously (best-effort)
+        try:
+            update_bandits_from_feedback(data.get('modules_used', {}), int(data.get('rating', 0)))
+        except Exception as e:
+            logger.warning(f"Bandit update skipped: {e}")
         logger.info('Feedback stored successfully')
         return jsonify({'ok': True}), 200
     except Exception as e:

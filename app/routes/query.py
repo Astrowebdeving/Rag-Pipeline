@@ -8,10 +8,13 @@ import traceback
 from datetime import datetime
 from flask import Blueprint, jsonify, request
 from app.services.state_service import rag_state
+from app.personalization.selector import ThompsonBandit
 from app.utils.embedding import create_query_embedding_with_method
 from app.retriever.dense_retriever import DenseRetriever
 from app.retriever.hybrid_retriever import HybridRetriever
 from app.retriever.advanced_retriever import AdvancedRetriever
+from app.retriever.langextract_retriever import LangExtractRetriever
+from app.retriever.dragon_retriever import DragonRetriever
 from app.augmented_generation.huggingface_generator import create_huggingface_generator
 from app.augmented_generation.ollama_generator import OllamaGenerator
 from app.utils.auth import require_api_key
@@ -46,6 +49,10 @@ def create_retriever_with_method(method: str):
             diversity_factor=rag_state.config.get('diversity_factor', 0.3),
             use_llm_query_enhancement=True  # Enable LLM query enhancement for advanced retrieval
         )
+    elif method == 'langextract':
+        return LangExtractRetriever()
+    elif method == 'dragon':
+        return DragonRetriever()
     else:  # default to dense
         return DenseRetriever()
 
@@ -179,8 +186,16 @@ def query_documents():
         logger.info(f"Total chunks in system: {len(rag_state.all_chunks)}")
         logger.info(f"Using retrieval method: {rag_state.config['retrieval_method']}")
         
-        # Retrieve relevant chunks using configured method
-        retriever = create_retriever_with_method(rag_state.config['retrieval_method'])
+        # Retrieve relevant chunks using configured method (bandit-driven if enabled)
+        retrieval_method = rag_state.config.get('retrieval_method', 'advanced')
+        try:
+            # Try to load bandit choice for retriever
+            retriever_bandit = ThompsonBandit.load('retriever', ['dense','hybrid','advanced','langextract'])
+            retrieval_method = retriever_bandit.select()
+            logger.info(f"Bandit selected retriever: {retrieval_method}")
+        except Exception:
+            pass
+        retriever = create_retriever_with_method(retrieval_method)
         
         # Handle different retriever types properly
         chunks_with_scores = []
@@ -224,10 +239,22 @@ def query_documents():
             for i, (chunk, score) in enumerate(validated_chunks, 1):
                 logger.info(f"  Chunk {i} (score: {score:.4f}): {chunk[:100]}..." if len(chunk) > 100 else f"  Chunk {i} (score: {score:.4f}): {chunk}")
         
+        # Build chunk->metadata map from vector store to expose metadata per result
+        chunk_metadata_map = {}
+        try:
+            meta_candidate_k = max(top_k * 10, 50)
+            _chunks_m, _scores_m, _metadata_m = rag_state.vector_store.search(query_embedding, meta_candidate_k)
+            for ch, md in zip(_chunks_m, _metadata_m):
+                if isinstance(ch, str) and ch not in chunk_metadata_map:
+                    chunk_metadata_map[ch] = md or {}
+        except Exception:
+            pass
+
         # Prepare response data
         response_data = {
             'chunks': [chunk for chunk, _ in validated_chunks],
             'scores': [float(score) for _, score in validated_chunks],
+            'chunk_metadata': [chunk_metadata_map.get(chunk, {}) for chunk, _ in validated_chunks],
             'num_results': len(validated_chunks),
             'retrieval_method': rag_state.config['retrieval_method'],
             'embedding_method': rag_state.config['embedding_method'],
@@ -237,13 +264,13 @@ def query_documents():
             'original_results_count': len(chunks_with_scores),
             'config_used': {
                 'top_k': top_k,
-                'retrieval_method': rag_state.config['retrieval_method'],
+                'retrieval_method': retrieval_method,
                 'embedding_method': rag_state.config['embedding_method']
             },
             # Add modules_used to support feedback collection
             'modules_used': {
                 'chunker': rag_state.config.get('chunking_method'),
-                'retriever': rag_state.config.get('retrieval_method'),
+                'retriever': retrieval_method,
                 'generator': rag_state.config.get('generation_method'),
                 'generation_model': rag_state.config.get('generation_model'),
             }
@@ -262,11 +289,35 @@ def query_documents():
                     
                     # Generate response using LLM with retrieved chunks
                     system_prompt = rag_state.config.get('generation_system_prompt') or None
+                    # Try to pass optional metadata if retriever provided it (langextract)
+                    extra_metadata = None
+                    try:
+                        if hasattr(retriever, 'last_metadata') and isinstance(retriever.last_metadata, list):
+                            extra_metadata = retriever.last_metadata[:len(chunk_texts)]
+                            # Also merge into response_data.chunk_metadata for UI viewing
+                            try:
+                                merged = []
+                                for base_md, add_md in zip(response_data.get('chunk_metadata', []), extra_metadata):
+                                    m = {}
+                                    if isinstance(base_md, dict):
+                                        m.update(base_md)
+                                    if isinstance(add_md, dict):
+                                        # prefix to avoid collisions
+                                        for k, v in add_md.items():
+                                            m[k] = v
+                                    merged.append(m)
+                                response_data['chunk_metadata'] = merged
+                            except Exception:
+                                pass
+                    except Exception:
+                        extra_metadata = None
+
                     generation_result = generator.generate_response(
                         query,
                         retrieved_chunks=chunk_texts,
                         system_prompt=system_prompt,
-                        allow_partial_on_timeout=True
+                        allow_partial_on_timeout=True,
+                        extra_metadata=extra_metadata
                     )
                     
                     if generation_result.get('success'):

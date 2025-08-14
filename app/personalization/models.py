@@ -36,6 +36,15 @@ class ModuleEvent(Base):
     reward = Column(Float, nullable=True)   # backfilled from feedback
 
 
+class BanditState(Base):
+    __tablename__ = "bandit_state"
+    id = Column(Integer, primary_key=True)
+    stage = Column(String, nullable=False, unique=True)  # chunker | retriever | generator
+    arms = Column(JSON, nullable=False)                  # list of arm names
+    alpha = Column(JSON, nullable=False)                 # dict arm->alpha
+    beta = Column(JSON, nullable=False)                  # dict arm->beta
+
+
 def create_session(db_url: str | None = None):
     """Create a SQLAlchemy session factory.
 

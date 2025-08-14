@@ -267,3 +267,24 @@ def list_chunks():
     except Exception as e:
         logger.error(f"Failed to list chunks: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+@system_bp.route('/status/resource', methods=['GET'])
+def get_status_resource():
+    """Return a markdown-formatted MCP-style system status resource.
+
+    Mirrors the MCP resource "rag://system/status" so the web UI can show it.
+    """
+    try:
+        stats = rag_state.get_system_stats()
+        status = 'healthy'
+        if stats['health_score'] < 0.5:
+            status = 'unhealthy'
+        elif stats['health_score'] < 0.8:
+            status = 'degraded'
+
+        md = f"""# RAG System Status\n\n**Status**: {status}\n**API Available**: Yes\n**Embedding Method**: {stats['config'].get('embedding_method', 'unknown')}\n**Embedding Dimensions**: {rag_state.vector_store.get_embedding_dimension() or 0}\n**Documents**: {stats['documents_count']}\n**Chunks**: {stats['chunks_count']}\n**Vector Store Count**: {stats.get('vector_store_count', stats['chunks_count'])}\n**Last Updated**: {stats['analytics'].get('last_activity_timestamp') or 'n/a'}\n"""
+        return md, 200, { 'Content-Type': 'text/plain; charset=utf-8' }
+    except Exception as e:
+        logger.error(f"Failed to build status resource: {e}")
+        return f"# RAG System Status\n\n**Status**: unhealthy\n**API Available**: No\n**Error**: {str(e)}\n", 200, { 'Content-Type': 'text/plain; charset=utf-8' }

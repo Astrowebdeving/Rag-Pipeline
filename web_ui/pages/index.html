@@ -323,7 +323,7 @@
             <div class="nav-buttons">
                 <a href="/" class="nav-btn">Home</a>
                 <a href="/settings" class="nav-btn">Settings</a>
-                <button class="nav-btn" onclick="checkHealth()">System Status</button>
+                <a href="/settings#systemStatusResource" class="nav-btn">System Status</a>
             </div>
         </div>
 
@@ -665,6 +665,12 @@
                     const score = result.scores && result.scores[index] ? result.scores[index] : 0;
                     html += `<div class="score">Relevance: ${(score * 100).toFixed(1)}%</div>`;
                     html += `<div>${chunk}</div>`;
+                    // Metadata toggle button
+                    const md = (result.chunk_metadata && result.chunk_metadata[index]) ? result.chunk_metadata[index] : null;
+                    html += '<div style="margin-top:8px; display:flex; gap:8px;">'
+                         + `<button class="btn" style="background:#6b7280" onclick="toggleMetadata(${index})">Show Metadata</button>`
+                         + '</div>';
+                    html += `<pre id="md_${index}" style="display:none; margin-top:8px; white-space:pre-wrap; background:#f3f4f6; padding:10px; border-radius:6px;">${md ? JSON.stringify(md, null, 2) : 'No metadata available'}</pre>`;
                     html += '</div>';
                 });
                 
@@ -702,6 +708,7 @@
 
             html += '</div>';
             resultDiv.innerHTML = html;
+            window.__lastChunkMetadata = (result.chunk_metadata || []);
 
             // Attach star handlers
             const stars = document.querySelectorAll('#queryResult .star');
@@ -711,6 +718,12 @@
               star.addEventListener('mouseleave', clearStarHover);
               star.addEventListener('click', handleStarClick);
             });
+        }
+
+        function toggleMetadata(i) {
+          const pre = document.getElementById('md_'+i);
+          if (!pre) return;
+          pre.style.display = (pre.style.display === 'none' || pre.style.display === '') ? 'block' : 'none';
         }
 
         function clearQueryResult() {
@@ -848,7 +861,7 @@
               body: JSON.stringify(body)
             });
             if (resp.ok) {
-              hideFeedbackModal();
+              // Do not clear or hide the response area; only show a toast
               showMessage('Thanks for your feedback!', 'success', 'queryResult');
             } else {
               const err = await resp.json().catch(() => ({error:'Unknown error'}));

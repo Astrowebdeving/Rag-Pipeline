@@ -56,7 +56,7 @@ class RAGSystemState:
         # Valid options for each configuration
         self.valid_chunking = ['semantic', 'fixed_length', 'adaptive']
         self.valid_embedding = ['sentence_transformer', 'tfidf', 'huggingface']
-        self.valid_retrieval = ['dense', 'hybrid', 'advanced']
+        self.valid_retrieval = ['dense', 'hybrid', 'advanced', 'langextract', 'dragon']
         self.valid_generation = ['none', 'huggingface', 'ollama']  # Include all available generators
         
         # System data storage
@@ -84,7 +84,9 @@ class RAGSystemState:
             'retrieval_stats': {  # Retrieval method usage statistics
                 'dense': 0,
                 'hybrid': 0,
-                'advanced': 0
+                'advanced': 0,
+                'langextract': 0,
+                'dragon': 0,
             },
             'chunking_stats': {  # Chunking method usage statistics
                 'fixed_length': 0,
@@ -116,11 +118,11 @@ class RAGSystemState:
         Returns:
             bool: True if update successful, False otherwise
         """
-        # Validate configuration values
-        valid_chunking = ['semantic', 'fixed_length', 'adaptive']
-        valid_embedding = ['tfidf', 'sentence_transformer']
-        valid_retrieval = ['dense', 'hybrid', 'advanced']
-        valid_generation = ['none', 'huggingface', 'ollama']
+        # Validate configuration values (use class-level valid lists)
+        valid_chunking = self.valid_chunking
+        valid_embedding = ['tfidf', 'sentence_transformer', 'huggingface']
+        valid_retrieval = self.valid_retrieval
+        valid_generation = self.valid_generation
         
         # Check if all provided values are valid
         for key, value in new_config.items():

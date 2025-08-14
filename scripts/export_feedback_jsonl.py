@@ -3,7 +3,7 @@ import argparse
 from app.personalization.models import create_session, Feedback
 
 
-def export_jsonl(out_path: str = "fine_tune_data.jsonl", min_rating: int = 1, max_rating: int = 2):
+def export_jsonl(out_path: str = "fine_tune_data.jsonl", min_rating: int = 1, max_rating: int = 4):
     Session = create_session()
     s = Session()
     q = s.query(Feedback).filter(Feedback.rating <= max_rating)

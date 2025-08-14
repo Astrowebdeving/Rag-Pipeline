@@ -172,6 +172,13 @@
                                 <div class="description">Splits every 500 characters (faster)</div>
                             </div>
                         </label>
+                        <label class="radio-option">
+                            <input type="radio" name="chunking_method" value="adaptive">
+                            <div>
+                                <strong>Adaptive</strong>
+                                <div class="description">Auto-selects strategy (balanced)</div>
+                            </div>
+                        </label>
                     </div>
                 </div>
 
@@ -192,6 +199,13 @@
                             <div>
                                 <strong>TF-IDF</strong>
                                 <div class="description">Word frequency based (faster)</div>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="embedding_method" value="huggingface">
+                            <div>
+                                <strong>HuggingFace</strong>
+                                <div class="description">Use a HuggingFace transformer encoder</div>
                             </div>
                         </label>
                     </div>
@@ -221,6 +235,20 @@
                             <div>
                                 <strong>Advanced Retrieval</strong>
                                 <div class="description">Vector semantic search (comprehensive) + LLM</div>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="retrieval_method" value="langextract">
+                            <div>
+                                <strong>LangExtract Retrieval</strong>
+                                <div class="description">LLM-based metadata (keywords/descriptors/tone) re-ranking</div>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="retrieval_method" value="dragon">
+                            <div>
+                                <strong>Dragon Retriever</strong>
+                                <div class="description">Dense pre-retrieval + cross-encoder re-ranking</div>
                             </div>
                         </label>
                     </div>
@@ -263,15 +291,22 @@
 
             <div id="message"></div>
 
-            <div class="setting-group" style="margin-top:20px;">
+            <div id="storedChunks" class="setting-group" style="margin-top:20px;">
                 <h3>Stored Chunks</h3>
                 <p class="description">Browse currently stored chunks (5 per page)</p>
                 <div style="display:flex; gap:8px; align-items:center; margin:10px 0;">
-                    <button type="button" class="btn" onclick="prevChunkPage()">◀ Prev</button>
+                    <button id="btnPrev" type="button" class="btn" onclick="prevChunkPage()">◀ Prev</button>
                     <span id="chunkPageInfo" style="color:#6b7280;">Page 1</span>
-                    <button type="button" class="btn" onclick="nextChunkPage()">Next ▶</button>
+                    <button id="btnNext" type="button" class="btn" onclick="nextChunkPage()">Next ▶</button>
                 </div>
                 <div id="chunkList" class="description" style="white-space:pre-wrap; line-height:1.5;"></div>
+            </div>
+
+            <div id="systemStatusResource" class="setting-group" style="margin-top:20px;">
+                <h3>System Status Resource</h3>
+                <p class="description">Fetch the MCP-style status resource and view it below</p>
+                <button type="button" class="btn" onclick="loadStatusResource()">Load Status Resource</button>
+                <pre id="statusResourcePre" class="description" style="white-space:pre-wrap; background:#f3f4f6; padding:12px; border-radius:6px; margin-top:10px;"></pre>
             </div>
         </div>
     </div>
@@ -283,7 +318,9 @@
         // Load current configuration on page load
         document.addEventListener('DOMContentLoaded', function() {
             loadCurrentConfig();
-            loadChunkPage(1);
+            if (location.hash === '#storedChunks') {
+                loadChunkPage(1);
+            }
         });
 
         // Load current configuration from API
@@ -300,6 +337,18 @@
             }
         }
 
+        async function loadStatusResource() {
+            try {
+                const resp = await fetch('/api/status/resource');
+                const txt = await resp.text();
+                const pre = document.getElementById('statusResourcePre') || document.getElementById('statusResource');
+                pre.textContent = txt;
+            } catch (e) {
+                const pre = document.getElementById('statusResourcePre') || document.getElementById('statusResource');
+                pre.textContent = 'Failed to load status resource: ' + e.message;
+            }
+        }
+
         async function loadChunkPage(page) {
             try {
                 const apiKeyHeader = window.RAG_API_KEY ? { 'X-API-Key': window.RAG_API_KEY } : {};
@@ -310,6 +359,11 @@
                 document.getElementById('chunkPageInfo').textContent = `Page ${data.page} / ${data.total_pages} (Total ${data.total})`;
                 const lines = data.chunks.map(c => `#${c.index} (${c.length} chars)\n${c.text}`);
                 document.getElementById('chunkList').textContent = lines.join('\n\n---\n\n');
+                // Enable/disable nav buttons based on bounds
+                const prev = document.getElementById('btnPrev');
+                const next = document.getElementById('btnNext');
+                if (prev) prev.disabled = (data.page <= 1);
+                if (next) next.disabled = (data.page >= data.total_pages);
             } catch (e) {
                 document.getElementById('chunkList').textContent = 'Network error: ' + e.message;
             }
@@ -320,6 +374,11 @@
         }
 
         function nextChunkPage() {
+            const info = document.getElementById('chunkPageInfo').textContent;
+            // Extract total_pages from text like "Page X / Y (Total Z)"
+            const match = info.match(/\/(\s*)(\d+)/);
+            const totalPages = match ? parseInt(match[2]) : null;
+            if (totalPages && chunkPage >= totalPages) return;
             loadChunkPage(chunkPage + 1);
         }
 

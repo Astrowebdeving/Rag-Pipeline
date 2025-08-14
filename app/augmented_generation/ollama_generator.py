@@ -91,13 +91,14 @@ class OllamaGenerator:
             return False  # Return False if connection fails
     
     def generate_response(
-        self, 
+        self,
         query: str, 
         retrieved_chunks: List[str],
         system_prompt: Optional[str] = None,
         max_tokens_override: Optional[int] = None,
         suppress_info_log: bool = False,
         allow_partial_on_timeout: bool = False,
+        extra_metadata: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Generate response using Ollama.
         
@@ -115,12 +116,29 @@ class OllamaGenerator:
             
             # Create the prompt (support system prompt)
             if system_prompt:
-                prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+                prompt = f"{system_prompt}\n\nContext:\n{context}\n\n"
             else:
                 if context:
-                    prompt = f"Based on the following context, please answer the question.\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+                    prompt = f"Based on the following context, please answer the question.\n\nContext:\n{context}\n\n"
                 else:
-                    prompt = f"Question: {query}\n\nAnswer:"
+                    prompt = ""
+
+            # Optionally add metadata summaries (if provided)
+            if extra_metadata:
+                try:
+                    # Compact metadata block
+                    meta_lines = []
+                    for md in extra_metadata[:5]:
+                        kws = ", ".join(md.get('lex_keywords', [])[:6])
+                        desc = ", ".join(md.get('lex_descriptors', [])[:4])
+                        tone = ", ".join(md.get('lex_tone', [])[:3])
+                        meta_lines.append(f"Keywords: {kws}\nDescriptors: {desc}\nTone: {tone}")
+                    meta_block = "\n\nMetadata (keywords/descriptors/tone):\n" + "\n---\n".join(meta_lines)
+                    prompt += meta_block
+                except Exception:
+                    pass
+
+            prompt += f"\n\nQuestion: {query}\n\nAnswer:"
             
             # Prepare request payload
             # For DeepSeek-R1, we normally use higher token limits to allow thinking + final answer

@@ -181,7 +181,7 @@ def get_available_methods() -> List[str]:
     Returns:
         List of available embedding method names
     """
-    return ['tfidf', 'sentence_transformer']
+    return ['tfidf', 'sentence_transformer', 'huggingface']
 
 def validate_embedding_config(config: dict) -> bool:
     """Validate embedding configuration parameters.

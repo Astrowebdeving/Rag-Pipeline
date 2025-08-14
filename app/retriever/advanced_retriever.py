@@ -60,6 +60,8 @@ class AdvancedRetriever:
         
         # LLM query enhancer (lazy loading)
         self._query_enhancer = None
+        # Persist last metadata for UI/generator
+        self.last_metadata: List[Dict[str, Any]] = []
         
         logger.info(f"AdvancedRetriever initialized with {base_retriever_type} base, rerank={rerank_results}, expand={expand_queries}, llm_enhance={use_llm_query_enhancement}")
     
@@ -260,11 +262,17 @@ Summary and keywords:"""
             # Step 4: Rerank candidates if enabled
             if self.rerank_results and unique_candidates:
                 reranked_results = self._rerank_candidates(unique_candidates, query_text, vector_store)
-                final_chunks = [chunk for chunk, score in reranked_results[:top_k]]
+                top_pairs = reranked_results[:top_k]
+                final_chunks = [chunk for chunk, score in top_pairs]
+                # Persist metadata for selected chunks
+                selected = set(final_chunks)
+                self.last_metadata = [cand.get('metadata', {}) for cand in unique_candidates if cand['chunk'] in selected]
             else:
                 # Sort by base score and take top_k
                 unique_candidates.sort(key=lambda x: x['base_score'], reverse=True)
-                final_chunks = [candidate['chunk'] for candidate in unique_candidates[:top_k]]
+                selected = unique_candidates[:top_k]
+                final_chunks = [candidate['chunk'] for candidate in selected]
+                self.last_metadata = [candidate.get('metadata', {}) for candidate in selected]
             
             # Step 5: Apply diversity if needed
             if self.diversity_factor > 0:
@@ -278,6 +286,7 @@ Summary and keywords:"""
             # Fallback to simple dense retrieval
             try:
                 fallback_retriever = DenseRetriever()
+                self.last_metadata = []
                 return fallback_retriever.retrieve(vector_store, query_embedding, top_k)
             except Exception as fallback_error:
                 logger.error(f"Fallback retrieval also failed: {fallback_error}")
@@ -561,32 +570,36 @@ Summary and keywords:"""
         # Handle missing or invalid metadata gracefully
         if not metadata or not isinstance(metadata, dict):
             return 0.0
-        
-        semantic_desc = metadata.get('semantic_description', '')
-        if not semantic_desc or not isinstance(semantic_desc, str):
-            return 0.0
-        
-        # Simple keyword overlap between query and semantic description
-        semantic_desc_lower = semantic_desc.lower()
+
         query_lower = query_text.lower()
-        
-        # Extract meaningful words (filter out common words)
-        query_words = set(word.strip() for word in query_lower.split() if len(word.strip()) > 2)
-        desc_words = set(word.strip() for word in semantic_desc_lower.split() if len(word.strip()) > 2)
-        
-        if query_words and desc_words:
-            # Calculate Jaccard similarity
-            overlap = len(query_words.intersection(desc_words))
-            total_unique = len(query_words.union(desc_words))
-            overlap_score = overlap / total_unique if total_unique > 0 else 0.0
-        else:
-            overlap_score = 0.0
-        
-        # Bonus for chunks that were analyzed by LLM
+        query_terms = set(w for w in query_lower.split() if len(w) > 2)
+        score_components = []
+
+        # 1) Semantic description overlap (if present)
+        semantic_desc = metadata.get('semantic_description', '')
+        if isinstance(semantic_desc, str) and semantic_desc:
+            desc_words = set(w for w in semantic_desc.lower().split() if len(w) > 2)
+            if query_terms and desc_words:
+                overlap = len(query_terms & desc_words)
+                total_unique = len(query_terms | desc_words)
+                score_components.append(overlap / total_unique if total_unique > 0 else 0.0)
+
+        # 2) LangExtract metadata overlap (if present)
+        for key, weight in (("lex_keywords", 1.0), ("lex_descriptors", 0.8), ("lex_tone", 0.5)):
+            vals = metadata.get(key)
+            if isinstance(vals, list) and vals:
+                meta_terms = set(str(v).lower() for v in vals if isinstance(v, (str, int, float)))
+                if meta_terms and query_terms:
+                    overlap = len(query_terms & meta_terms)
+                    denom = max(len(query_terms), 6)
+                    score_components.append((overlap / denom) * weight)
+
+        # 3) Bonus for LLM-analyzed chunks
         analysis_bonus = 0.05 if metadata.get('topics_analyzed', False) else 0.0
-        
-        metadata_score = overlap_score + analysis_bonus
-        return min(metadata_score, 1.0)  # Cap at 1.0
+
+        total = sum(score_components) + analysis_bonus
+        # Normalize roughly to 0..1 range
+        return float(min(total, 1.0))
     
     def _calculate_query_match_score(self, chunk: str, query: str) -> float:
         """Calculate direct query-chunk matching score."""
